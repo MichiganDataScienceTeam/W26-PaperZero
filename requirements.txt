@@ -1,0 +1,7 @@
+setuptools==80.9.0
+cppimport==22.8.2
+matplotlib==3.10.8
+numpy==2.4.0
+torch==2.9.1
+pyparsing==3.2.5
+tqdm==4.67.1
