@@ -5,3 +5,4 @@
 *.pyd
 *.ipynb
 .rendered.*
+_ignore_*
