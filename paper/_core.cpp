@@ -79,19 +79,22 @@ PYBIND11_MODULE(_core, m) {
             return result;
         }, py::arg("rows"), py::arg("cols"), py::arg("theta") = 0)
         .def("compute_boundary_points", [](Paper & self, double max_dist) {
-            std::vector<Vec2> temp;
-            {
+            auto data = [&]() {
                 py::gil_scoped_release release;
-                temp = self.compute_boundary_points(max_dist);
-            }
-            py::array_t<double> result({static_cast<int>(temp.size()), 2});
-            auto buffer_info = result.request();
-            double * ptr = static_cast<double *>(buffer_info.ptr);
-            for (size_t i = 0; i < temp.size(); i++) {
-                ptr[buffer_info.shape[1]*i] = temp[i].x;
-                ptr[buffer_info.shape[1]*i+1] = temp[i].y;
-            }
-            return result;
+                return self.compute_boundary_points(max_dist);
+            }();
+
+            std::vector<Vec2> & points = data.first;
+            std::vector<size_t> & indices = data.second;
+
+            py::array_t<double> result_points({points.size(), static_cast<size_t>(2)});
+            
+            py::array_t<size_t> result_indices(indices.size());
+
+            std::memcpy(result_points.mutable_data(), points.data(), points.size() * sizeof(Vec2));
+            std::memcpy(result_indices.mutable_data(), indices.data(), indices.size() * sizeof(size_t));
+
+            return py::make_tuple(result_points, result_indices);
         })
         .def("__repr__", [](const Paper & self) {
             return "<Paper object with " + std::to_string(self.layers.size()) + " layers>";

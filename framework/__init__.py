@@ -3,7 +3,7 @@
 from typing import Tuple, Dict, Any
 
 class ContextSampler:
-    def sample(self) -> Dict[str, Any]: raise NotImplementedError
+    def sample(self, level: int) -> Dict[str, Any]: raise NotImplementedError
     def update(self, metrics) -> None: pass
 
 

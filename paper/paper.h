@@ -3,6 +3,8 @@
 #include <unordered_set>
 #include <queue>
 #include <algorithm>
+#include <utility>
+#include <iterator>
 
 #include "geometry.h"
 #include "layer.h"
@@ -232,8 +234,10 @@ public:
         return Rasterizer::render(layers, rows, cols, theta);
     }
 
-    std::vector<Vec2> compute_boundary_points(double max_dist) const {
-        std::vector<Vec2> result;
+    std::pair<std::vector<Vec2>, std::vector<size_t>>
+    compute_boundary_points(double max_dist) const {
+        // Compute segments
+        std::vector<Segment> segs;
         for (const Layer & layer : layers) {
             std::vector<Segment> temp;
             for (size_t i = 0; i < layer.vertices.size(); i++) {
@@ -246,47 +250,68 @@ public:
                 std::vector<Segment> temp2;
                 for (const Segment & s: temp) {
                     for (const Segment & s2 : layer2.subtract(s)) {
-                        temp2.push_back(s2);
+                        if (s2.p2.x < s2.p1.x) {
+                            temp2.push_back(Segment{s2.p2, s2.p1});
+                        } else {
+                            temp2.push_back(s2);
+                        }
                     }
                 }
                 temp = std::move(temp2);
                 if (temp.empty()) { break; }
             }
 
-            for (const Segment & s : temp) {
-                result.push_back(s.p1);
-                result.push_back(s.p2);
-
-                const double len = (s.p1 - s.p2).norm();
-                if (len > max_dist) {
-                    const int intermediates = std::ceil(len/max_dist);
-                    const Vec2 dir = s.p2 - s.p1;
-                    for (int i = 1; i < intermediates; i++) {
-                        result.push_back(s.p1 + (dir*(static_cast<double>(i)/intermediates)));
-                    }
-                }
-            }
+            segs.reserve(segs.size() + temp.size());
+            segs.insert(segs.end(),
+                std::make_move_iterator(temp.begin()),
+                std::make_move_iterator(temp.end())
+            );
         }
-        std::sort(result.begin(), result.end(), [](Vec2 p1, Vec2 p2) {
-            return p1.x < p2.x;
+        
+        // Deduplicate
+        std::sort(segs.begin(), segs.end(), [](const Segment & a, const Segment & b){
+            return a.p1.x < b.p1.x;
         });
+        std::vector<bool> is_bad(segs.size(), false);
 
-        auto write = result.begin();
-        for (auto it = result.begin() + 1; it != result.end(); ++it) {
-            bool is_duplicate = false;
-            for (auto checker = write; checker >= result.begin(); --checker) {
-                if ((it->x - checker->x) > Origami::EPSILON) { break; }
-                if ((*it - *checker).norm() <= Origami::EPSILON) {
-                    is_duplicate = true;
-                }
-            }
-            if (!is_duplicate) {
-                ++write;
-                *write = *it;
+        for (size_t i = 0; i < segs.size(); i++) {
+            if (is_bad[i]) { continue; }
+            for (size_t j = i+1; j < segs.size(); j++) {
+                if (segs[j].p1.x > segs[i].p1.x + Origami::EPSILON) { break; }
+                is_bad[i] = ((segs[i].p1 - segs[j].p1).norm() < Origami::EPSILON) &&
+                    ((segs[i].p2 - segs[j].p2).norm() < Origami::EPSILON);
             }
         }
-        result.erase(write+1, result.end());
-        return result;
+
+        size_t write_idx = 0;
+        for (size_t i = 0; i < segs.size(); i++) {
+            if (!is_bad[i]) {
+                if (write_idx != i) { segs[write_idx] = std::move(segs[i]); }
+                write_idx++;
+            }
+        }
+        segs.resize(write_idx);
+
+        // Compute intermediates
+        std::vector<Vec2> result;
+        std::vector<size_t> indices;
+        for (const Segment & s : segs) {
+            indices.push_back(result.size());
+            result.push_back(s.p1);
+
+            const double len = (s.p1 - s.p2).norm();
+            if (len > max_dist) {
+                const int intermediates = std::ceil(len/max_dist);
+                const Vec2 dir = s.p2 - s.p1;
+                for (int i = 1; i < intermediates; i++) {
+                    result.push_back(s.p1 + (dir*(static_cast<double>(i)/intermediates)));
+                }
+            }
+            
+            result.push_back(s.p2);
+        }
+        indices.push_back(result.size());
+        return {result, indices};
     }
 
 private:

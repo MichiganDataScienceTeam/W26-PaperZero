@@ -1,8 +1,9 @@
 from framework import ContextSampler
-from paper import Vec2, Segment, Paper
+from paper import Vec2, Segment, Paper, Segment, Vec2
 import numpy as np
+import random
 import numpy.typing as npt
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any
 
 class OrigamiSampler(ContextSampler):
     """
@@ -14,95 +15,85 @@ class OrigamiSampler(ContextSampler):
     """
 
     def __init__(self,
-                 resolution: Tuple[int, int], 
-                 max_fold_attempts: int = 200,
+                 max_fold_attempts: int = 20,
                  max_paper_retries: int = 10):
         """
         Args:
-            resolution: (width, height) tuple for rasterization.
             max_fold_attempts: How many times to try finding a VALID fold line before giving up on a step.
             max_paper_retries: How many times to restart the entire paper if we get stuck.
         """
 
-        self.res: Tuple[int, int] = resolution
         self.max_fold_attempts = max_fold_attempts
         self.max_paper_retries = max_paper_retries
 
-    def sample(self, level: int) -> Optional[Dict[str, Any]]:
+    def sample(self, level: int) -> Dict[str, Any]:
         """
-        Generates a task with EXACTLY `level` folds.
+        Generates a task with AT MOST `level` folds.
         
         Args:
             level: The integer number of folds required.
-            
-        Returns:
-            Dict containing the task data, or None if generation failed.
-        """
-        # Try to generate the full paper N times
-        for _ in range(self.max_paper_retries):
-            result = self._generate_single_paper(level)
-            if result is not None:
-                return result
         
-        return None
+        Returns:
+            Dict containing the task data
+        """
 
-    def _generate_single_paper(self, target_folds: int) -> Optional[Dict[str, Any]]:
-        base_paper = Paper()
-        target_paper = base_paper.copy()
-        actions = []
+        paper = Paper()
+        total_action = []
 
-        for _ in range(target_folds):
-            points = target_paper.compute_boundary_points(0.01)
-            if len(points) < 2:
-                return None
-
-            fold_found = False
-            for _ in range(self.max_fold_attempts):
-                i, j = np.random.randint(0, len(points), size=2)
-                if i == j:
-                    continue
-
-                p1, p2 = points[i], points[j]
-                if np.linalg.norm(p1 - p2) < 1e-3:
-                    continue
-
-                fold_line = Segment(Vec2(*p1), Vec2(*p2))
-                before = len(target_paper.layers)
-
-                try:
-                    ok = target_paper.fold(fold_line)
-                except Exception:
-                    continue
-
-                if not ok or len(target_paper.layers) <= before:
-                    continue
-
-                actions.append(np.concatenate([p1, p2]).astype(np.float32))
-                fold_found = True
-                break
-
-            if not fold_found:
-                return None
-
-        # === REPLAY VERIFICATION (critical) ===
-        replay = base_paper.copy()
-        try:
-            for a in actions:
-                replay.fold(Segment(Vec2(a[0], a[1]), Vec2(a[2], a[3])))
-        except Exception:
-            return None
-
-        if len(replay.layers) != len(target_paper.layers):
-            return None
-
-        target_mask = replay.rasterize(*self.res).astype(bool)
+        for _ in range(level):
+            for _ in range(self.max_paper_retries):
+                curr_layers = len(paper.layers)
+                fold_array = self._generate_single_fold(paper)
+                if len(paper.layers) != curr_layers:
+                    total_action.append(fold_array)
+                    break
 
         return {
-            "base_paper": base_paper,
-            "target_mask": target_mask,
-            "total_action": np.stack(actions),
-            "difficulty": target_folds,
-            "target_difficulty": target_folds,
+            "total_action": np.concatenate(total_action),
+            "actual_folds": len(total_action),
+            "final_paper": paper
         }
 
+    
+    def _generate_single_fold(self, paper: Paper) -> npt.NDArray:
+        EPSILON = 1e-10
+        BOUNDARY_DIST = 0.01
+        pts, idx = paper.compute_boundary_points(BOUNDARY_DIST)
+        n = len(idx)-1
+        
+        # Sample S1 and P1
+        s1 = random.randint(0, n-1)
+        p1 = pts[random.randint(idx[s1], idx[s1+1]-1)]
+        
+        # Exclude S1 and its endpoints
+        banned, excl = [pts[idx[s1]], pts[idx[s1+1]-1]], {s1}
+        
+        for b in banned:
+            if (p1[0]-b[0])**2 + (p1[1]-b[1])**2 < EPSILON:
+                starts, ends = pts[idx[:-1]], pts[idx[1:]-1]
+                
+                bad_indices = np.where((np.sum((starts-p1)**2, axis=1) < EPSILON) |
+                                    (np.sum((ends-p1)**2, axis=1) < EPSILON))[0]
+                
+                excl.update(bad_indices)
+                for i in bad_indices: 
+                    banned.extend([starts[i], ends[i]])
 
+                break
+
+        # Sample S2 and P2
+        for _ in range(self.max_fold_attempts):
+            while (s2 := random.randint(0, n-1)) in excl: pass
+            start, end = idx[s2], idx[s2+1]
+            p2 = pts[random.randint(start, end-1)]
+            for b in banned:
+                if (p2[0]-b[0])**2 + (p2[1]-b[1])**2 < EPSILON:
+                    break
+            else:
+                try:
+                    if paper.fold(Segment(Vec2(p1[0], p1[1]), Vec2(p2[0], p2[1]))):
+                        return np.concatenate([p1, p2])
+                except:
+                    pass
+        
+        return np.array([])
