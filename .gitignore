@@ -6,3 +6,4 @@
 *.ipynb
 .rendered.*
 _ignore_*
+env
