@@ -20,7 +20,6 @@ class ConvBlock(nn.Module):
         self.norm = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU()
 
-
     def forward(self, x):
         out = self.conv(x)
         out = self.norm(out)
@@ -49,7 +48,6 @@ class ResBlock(nn.Module):
         self.norm2 = nn.BatchNorm2d(channels)
 
         self.relu = nn.ReLU()
-
     
     def forward(self, x):
         out = self.conv1(x)
@@ -87,26 +85,22 @@ class PolicyHead(nn.Module):
             kernel_size=1
         )
 
-
     def forward(self, x):
         out = self.relu(self.bn(self.conv(x)))
         out = self.policy(out)
         return out
 
 
-    """def spatial_softmax(logits):
-        B, C, H, W = logits.shape
-        logits = logits.view(B, C, -1)
-        probs = torch.softmax(logits, dim=2)
-        return probs.view(B, C, H, W)"""
-
-
 class ValueHead(nn.Module):
-    def __init__(self, in_channels: int, kernel: int):
+    def __init__(self, in_channels: int):
         super().__init__()
+        self.network = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_channels**3, out_features=1)
+        )
 
     def forward(self, x):
-        return NotImplementedError
+        return self.network(x)
 
 
 class ThinkArchitecture(nn.Module):
@@ -121,6 +115,7 @@ class ThinkArchitecture(nn.Module):
         ])
 
         self.policy = PolicyHead(out_channels)
+        self.value = ValueHead(out_channels)
 
     def forward(self, x):
         out = self.conv(x)
@@ -128,10 +123,10 @@ class ThinkArchitecture(nn.Module):
         for res in self.res_tower:
             out = res(out)
 
-        # add policy + value head...?
-        out = self.policy(out)
+        policy = self.policy(out)
+        value = self.value(out)
 
-        return out
+        return (policy, value)
 
 
 if __name__ == "__main__":
@@ -145,19 +140,22 @@ if __name__ == "__main__":
     img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
     network = ThinkArchitecture(1, 128, 3)
 
-    out = network.forward(img_tensor)
-    out_np = out.detach().squeeze().numpy() 
+    policy, value = network(img_tensor)
+    policy_np = policy.detach().squeeze().numpy() 
+
+    print(f"Value: {value.item()}")
     
-    out1 = out_np[0] # Channel 0: Start Point Map
-    out2 = out_np[1] # Channel 1: End Point Map
+    policy1 = policy_np[0] # Channel 0: Start Point Map
+    policy2 = policy_np[1] # Channel 1: End Point Map
 
     # Plot
     fig, ax = plt.subplots(1, 2)
     
-    ax[0].imshow(out1, cmap='Reds', origin='lower')
+    ax[0].imshow(policy1, cmap='Reds', origin='lower')
     ax[0].set_title("Start Point Policy")
     
-    ax[1].imshow(out2, cmap='Blues', origin='lower')
+    ax[1].imshow(policy2, cmap='Blues', origin='lower')
+    ax[1].imshow(policy2, cmap='Blues', origin='lower')
     ax[1].set_title("End Point Policy")
     
     plt.show()
