@@ -13,6 +13,16 @@ We will (hopefully) make progress on 2D origami inverse design
  5 [2/22] | [Presented](https://docs.google.com/presentation/d/1tcJ4m0nXVUpFHoAOz68hvhYdSc0xaxlkEB70pyQQgko/edit?usp=sharing) | - | - |
 
 
+## Documentation
+
+- Python API guide: [docs/docs.md](docs/docs.md)
+- References by module:
+  - [docs/modules/paper.md](docs/modules/paper.md)
+  - [docs/modules/framework.md](docs/modules/framework.md)
+  - [docs/modules/data.origami_sampler.md](docs/modules/data.origami_sampler.md)
+  - [docs/modules/envs.origami_env.md](docs/modules/envs.origami_env.md)
+
+
 ## Acknowledgements
 
 This project is supported by compute resources provided by [MIDAS](https://midas.umich.edu/), [U-M ARC High Performance Computing](https://its.umich.edu/advanced-research-computing), [Google Cloud](https://cloud.google.com/), and [Google TPU Research Cloud](https://sites.research.google/trc/about/)
