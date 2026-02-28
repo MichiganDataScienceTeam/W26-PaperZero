@@ -6,3 +6,5 @@
 *.ipynb
 .rendered.*
 _ignore_*
+agents.md
+lessons.md
