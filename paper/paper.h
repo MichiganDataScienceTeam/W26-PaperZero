@@ -179,10 +179,15 @@ public:
 
                 for (const EdgeConnection & conn : new_adjacency[curr]) {
                     size_t neighbor = conn.neighbor_layer;
+                    const bool neighbor_active = new_layers[neighbor].should_reflect(l);
+                    const double edge_dist1 = std::abs(conn.v1.dot(l.n) - l.d);
+                    const double edge_dist2 = std::abs(conn.v2.dot(l.n) - l.d);
+                    const bool is_hinge_edge = edge_dist1 <= Origami::EPSILON &&
+                                               edge_dist2 <= Origami::EPSILON;
                     
-                    // Only traverse to neighbors on the active side
+                    // Non-hinge connections must move together to avoid tearing
                     if (connected_component.count(neighbor) == 0 && 
-                        new_layers[neighbor].should_reflect(l)) {
+                        (neighbor_active || !is_hinge_edge)) {
                         connected_component.insert(neighbor);
                         q.push(neighbor);
                     }
