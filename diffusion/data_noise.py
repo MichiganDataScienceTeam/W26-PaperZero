@@ -280,7 +280,13 @@ if __name__ == "__main__":
     ds = DiffusionDataset(trajectories, T=T, level=LEVEL)
     x_0, x_t, eps, t, m = ds[0]
     print(f"\nDataset sample: x_0={x_0.shape}, x_t={x_t.shape}, eps={eps.shape}, t={t}")
-    print(f"  x_0[0:5] (s0, should be clean): {x_0[:5]}")
-    print(f"  x_t[0:5] (s0, should match x_0): {x_t[:5]}")
-    print(f"  x_0[-5:] (s3, should be clean): {x_0[-5:]}")
-    print(f"  x_t[-5:] (s3, should match x_0): {x_t[-5:]}")
+
+    s0_diff = (x_t[:STATE_DIM] - x_0[:STATE_DIM]).abs().mean().item()
+    s3_diff = (x_t[-STATE_DIM:] - x_0[-STATE_DIM:]).abs().mean().item()
+    mid_start = STATE_DIM
+    mid_end = -STATE_DIM
+    mid_diff = (x_t[mid_start:mid_end] - x_0[mid_start:mid_end]).abs().mean().item()
+
+    print(f"  s0 mean |x_t - x_0|: {s0_diff:.6f}  (masked, should be 0)")
+    print(f"  s3 mean |x_t - x_0|: {s3_diff:.6f}  (masked, should be 0)")
+    print(f"  middle mean |x_t - x_0|: {mid_diff:.4f}  (noised, should be > 0)")
