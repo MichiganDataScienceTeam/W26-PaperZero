@@ -1,11 +1,14 @@
 # select, expand, evalualte, backprop
 import torch.nn as nn
-from paper import Paper, Segment, Vec2
+from paper import Paper
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import math
-from encoder import ThinkArchitecture
+from mcts.encoder import ThinkArchitecture
+from mcts.temp_segment_finder import find_segments
+
+from typing import List
 
 network = ThinkArchitecture(1, 128, 3)
 
@@ -14,18 +17,18 @@ class Node:
         super().__init__()
 
         # tree
-        self.parent = parent
-        self.children = []
+        self.parent: Node = parent
+        self.children: List[Node] = []
 
         # data
-        self.paper = paper
+        self.paper: Paper = paper
         self.N = 0      # number of visits
         self.W = 0.0    # sum of all values
         self.Q = self.W / self.N if self.N != 0 else 0.0    # W/N (0 if N = 0)
         self.P = 0.0 if not self.parent else self.parent.P     # prior
 
         # constants
-        self.sumB = None
+        self.sumB = 0
 
     # For testing purposes
     def render(self):
@@ -37,10 +40,15 @@ class Node:
 
     def expand(self):
         """Make Children"""
-        # TODO for Jeffrey: Generate list of segments
-        segments = []
+        # Generate list of segments
+        segments = find_segments(self.paper)
+        print(len(segments))
         
-        policy, value = network(self.paper)
+        img = paper.rasterize(128, 128, 0.0)
+        img = np.array(img).reshape(128, 128)
+        img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+
+        policy, value = network(img_tensor)
 
         policy = policy.squeeze(0)  # (2, H, W)
 
@@ -60,20 +68,22 @@ class Node:
 
             priors.append((pr1 * pr2).item())
 
-        # normalize
+        # Normalize
         priors = np.array(priors)
         if priors.sum() > 0:
             priors /= priors.sum()
         else:
             priors = np.ones_like(priors) / len(priors)
 
-        # create children - expand
+        # Create children - expand
         for i, P in enumerate(priors):
-            child = Node(paper=self.paper.fold(segments[i]), parent=self)
+            copyP = self.paper.copy()
+            copyP.fold(segments[i])
+            child = Node(paper=copyP, parent=self)
             child.P = P
             self.children.append(child)
     
-        # evaluate & backprop - update W, N, Q for all visited nodes
+        # Evaluate & Backprop - update W, N, Q for all visited nodes
         node: Node = self
         while node is not None:
             node.W += value.item()
@@ -86,6 +96,7 @@ class Node:
         # Make sure there's children
         if len(self.children) == 0:
             return None # We're done (leaf node)
+
         # Update sumB if necessary
         if self.sumB is None:
             for child in self.children:
@@ -96,4 +107,16 @@ class Node:
             explore = c * self.P * math.sqrt(self.sumB) / (1 + child.N)
             return self.Q + explore
 
-        return max(self.children, key=puct_score)
+        return max(self.children, key=lambda child: puct_score(self, child, c))
+    
+if __name__ == "__main__":
+    paper = Paper()
+    root = Node(paper=paper)
+
+    root.expand()
+    new_node = root.select()
+    new_node.render()   # Check if None
+
+    new_node.expand()
+    new_node2 = new_node.select()
+    new_node2.render()  # Check if None
