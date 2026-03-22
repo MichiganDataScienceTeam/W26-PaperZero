@@ -37,26 +37,55 @@ class Node:
 
     def expand(self):
         """Make Children"""
-
+        # TODO for Jeffrey: Generate list of segments
+        segments = []
+        
         policy, value = network(self.paper)
-        self.W += value
 
-        # TODO: Generate list of segments
+        policy = policy.squeeze(0)  # (2, H, W)
 
-        # Calculate prior
-        
-        # Select node
+        start_logits = policy[0]
+        end_logits   = policy[1]
 
-        # Generate the child node
+        start_probs = torch.softmax(start_logits.flatten(), dim=0).view_as(start_logits)
+        end_probs   = torch.softmax(end_logits.flatten(), dim=0).view_as(end_logits)
 
-        # Back prop
-        
+        priors = []
+
+        for seg in segments:
+            pt1, pt2 = seg.p1, seg.p2
+
+            pr1 = start_probs[int(pt1.x), int(pt1.y)]
+            pr2 = end_probs[int(pt2.x), int(pt2.y)]
+
+            priors.append((pr1 * pr2).item())
+
+        # normalize
+        priors = np.array(priors)
+        if priors.sum() > 0:
+            priors /= priors.sum()
+        else:
+            priors = np.ones_like(priors) / len(priors)
+
+        # create children - expand
+        for i, P in enumerate(priors):
+            child = Node(paper=self.paper.fold(segments[i]), parent=self)
+            child.P = P
+            self.children.append(child)
+    
+        # evaluate & backprop - update W, N, Q for all visited nodes
+        node: Node = self
+        while node is not None:
+            node.W += value.item()
+            node.N += 1
+            node.Q = node.W / node.N
+            node = node.parent
+
 
     def select(self, c=1):
         # Make sure there's children
-        if len(self.children) > 0:
+        if len(self.children) == 0:
             return None # We're done (leaf node)
-
         # Update sumB if necessary
         if self.sumB is None:
             for child in self.children:
