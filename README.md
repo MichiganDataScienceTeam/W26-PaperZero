@@ -10,7 +10,18 @@ We will (hopefully) make progress on 2D origami inverse design
 | 2 [2/1] | [Presented](https://docs.google.com/presentation/d/1jD12DnJZxx7jQRWJ_R-Frz9TyVPNW3pZWe3-5gTS984/edit?usp=sharing), [Compact](https://docs.google.com/presentation/d/12hWlXux6woeuNFrVD4sYGskgnp6YHPrTgv5sgBvdA2A/edit?usp=sharing) | Thinking | [Nice book](https://en.wikipedia.org/wiki/Thinking,_Fast_and_Slow), [AlphaGo paper](https://www.nature.com/articles/nature16961), [Trajectory diffusion paper](https://arxiv.org/pdf/2205.09991) |
 | 3 [2/8] | [Presented](https://docs.google.com/presentation/d/1MZe3lS8qiJf9P9qsbLNTqYp1HvTwXuCuv6mysn3bOkw/edit?usp=sharing), [Compact](https://docs.google.com/presentation/d/19xECF9LbQQbHvxidFYt4bf4bYIcevcCOLuzHw32X6Dg/edit?usp=sharing) | Neural Nets | [Very nice VAE article](https://www.ibm.com/think/topics/variational-autoencoder), ["Inverse" Convolution](https://docs.pytorch.org/docs/stable/generated/torch.nn.ConvTranspose2d.html) |
 | 4 [2/15] | [Presented](https://docs.google.com/presentation/d/1rWmRIyFgGiBTL4KvoY9_gK5Zj4pU1hv97tHS-sfMXnM/edit?usp=sharing), [Compact](https://docs.google.com/presentation/d/1TYY1yLI_jm2kIEdolk8-ZDEF9vQmH9oBNdjQand3Xio/edit?usp=sharing) | Heads, Trees, and VAEs | [VAE explainer](https://xnought.github.io/vae-explainer/) |
- 5 [2/22] | [Presented](https://docs.google.com/presentation/d/1tcJ4m0nXVUpFHoAOz68hvhYdSc0xaxlkEB70pyQQgko/edit?usp=sharing) | - | - |
+| 5 [2/22] | [Presented](https://docs.google.com/presentation/d/1tcJ4m0nXVUpFHoAOz68hvhYdSc0xaxlkEB70pyQQgko/edit?usp=sharing) | - | - |
+| 6 [3/15] | [Presented](https://docs.google.com/presentation/d/17iYOpoptnzN54yRbf1hMKZyJy2qWvAMbGDMZ3qouZ2k/edit?usp=sharing) | - | - |
+
+
+## Documentation
+
+- Python API guide: [docs/docs.md](docs/docs.md)
+- References by module:
+  - [docs/modules/paper.md](docs/modules/paper.md)
+  - [docs/modules/framework.md](docs/modules/framework.md)
+  - [docs/modules/data.origami_sampler.md](docs/modules/data.origami_sampler.md)
+  - [docs/modules/envs.origami_env.md](docs/modules/envs.origami_env.md)
 
 
 ## Acknowledgements

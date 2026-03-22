@@ -7,11 +7,7 @@ from typing import Tuple, Dict, Any
 
 class OrigamiSampler(ContextSampler):
     """
-    A robust, stateless sampler for generating origami tasks at specific difficulty levels.
-    
-    Guarantees:
-    - If sample(k) returns a task, it has EXACTLY k folds.
-    - It will never return a task with < k folds (no fallback/partial credit).
+    Stateless sampler for generating 2D origami tasks at a target level.
     """
 
     def __init__(self,
@@ -28,13 +24,17 @@ class OrigamiSampler(ContextSampler):
 
     def sample(self, level: int) -> Dict[str, Any]:
         """
-        Generates a task with AT MOST `level` folds.
-        
+        Generates a folded paper task with up to `level` successful folds.
+
         Args:
-            level: The integer number of folds required.
-        
+            level: Maximum number of fold steps to attempt.
+
         Returns:
-            Dict containing the task data
+            Dict with keys:
+            "total_action": np.ndarray of shape (4 * actual_folds,) containing
+                flattened fold endpoints [x1, y1, x2, y2, ...].
+            "actual_folds": Number of successful folds applied.
+            "final_paper": Folded Paper state after sampling.
         """
 
         paper = Paper()
@@ -48,8 +48,14 @@ class OrigamiSampler(ContextSampler):
                     total_action.append(fold_array)
                     break
 
+        total_action_array = (
+            np.concatenate(total_action)
+            if total_action
+            else np.array([], dtype=np.float64)
+        )
+
         return {
-            "total_action": np.concatenate(total_action),
+            "total_action": total_action_array,
             "actual_folds": len(total_action),
             "final_paper": paper
         }
