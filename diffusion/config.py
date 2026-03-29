@@ -35,7 +35,7 @@ class VAEConfig:
 @dataclass(frozen=True)
 class DataConfig:
     action_dim: int = 4
-    horizon: int = 15
+    horizon: int = 7
     default_timesteps: int = 1000
     pad_state_value: float = 0.0
     pad_action_value: float = 0.0
