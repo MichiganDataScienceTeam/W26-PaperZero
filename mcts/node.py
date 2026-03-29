@@ -1,6 +1,6 @@
 # select, expand, evalualte, backprop
 import torch.nn as nn
-from paper import Paper
+from paper import Paper, Segment
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -10,10 +10,12 @@ from mcts.temp_segment_finder import find_segments
 
 from typing import List
 
-network = ThinkArchitecture(1, 128, 3)
+model = ThinkArchitecture(1, 128, 3)
+
+# TODO - figure out how we add a target image [i think it should be given to the ThinkArchitecture]
 
 class Node:
-    def __init__(self, paper: Paper, parent=None):
+    def __init__(self, paper: Paper, parent=None, segment=None):
         super().__init__()
 
         # tree
@@ -22,13 +24,14 @@ class Node:
 
         # data
         self.paper: Paper = paper
+        self.segment: Segment = segment
         self.N = 0      # number of visits
         self.W = 0.0    # sum of all values
         self.Q = self.W / self.N if self.N != 0 else 0.0    # W/N (0 if N = 0)
         self.P = 0.0 if not self.parent else self.parent.P     # prior
 
         # constants
-        self.sumB = 0
+        self.sumB = None
 
     # For testing purposes
     def render(self):
@@ -42,13 +45,12 @@ class Node:
         """Make Children"""
         # Generate list of segments
         segments = find_segments(self.paper)
-        print(len(segments))
         
-        img = paper.rasterize(128, 128, 0.0)
+        img = self.paper.rasterize(128, 128, 0.0)
         img = np.array(img).reshape(128, 128)
         img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
 
-        policy, value = network(img_tensor)
+        policy, value = model(img_tensor)
 
         policy = policy.squeeze(0)  # (2, H, W)
 
@@ -79,7 +81,7 @@ class Node:
         for i, P in enumerate(priors):
             copyP = self.paper.copy()
             copyP.fold(segments[i])
-            child = Node(paper=copyP, parent=self)
+            child = Node(paper=copyP, parent=self, segment=segments[i])
             child.P = P
             self.children.append(child)
     
@@ -99,6 +101,7 @@ class Node:
 
         # Update sumB if necessary
         if self.sumB is None:
+            self.sumB = 0
             for child in self.children:
                 self.sumB += child.N
 
