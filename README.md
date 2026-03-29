@@ -12,6 +12,8 @@ We will (hopefully) make progress on 2D origami inverse design
 | 4 [2/15] | [Presented](https://docs.google.com/presentation/d/1rWmRIyFgGiBTL4KvoY9_gK5Zj4pU1hv97tHS-sfMXnM/edit?usp=sharing), [Compact](https://docs.google.com/presentation/d/1TYY1yLI_jm2kIEdolk8-ZDEF9vQmH9oBNdjQand3Xio/edit?usp=sharing) | Heads, Trees, and VAEs | [VAE explainer](https://xnought.github.io/vae-explainer/) |
 | 5 [2/22] | [Presented](https://docs.google.com/presentation/d/1tcJ4m0nXVUpFHoAOz68hvhYdSc0xaxlkEB70pyQQgko/edit?usp=sharing) | - | - |
 | 6 [3/15] | [Presented](https://docs.google.com/presentation/d/17iYOpoptnzN54yRbf1hMKZyJy2qWvAMbGDMZ3qouZ2k/edit?usp=sharing) | - | - |
+| 7 [3/22] | [Presented](https://docs.google.com/presentation/d/12H-c2ph2XUCa9jWCh4nhdwdcb_5z7vVKbIrOjz33fa8/edit?usp=sharing) | - | - |
+| 8 [3/29] | [Presented](https://docs.google.com/presentation/d/17PhuDfpHRFUqHmauGOUBuHJX-GFP21CS7T6dTFI-PuM/edit?usp=sharing) | - | - |
 
 
 ## Documentation
