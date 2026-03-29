@@ -7,3 +7,5 @@
 .rendered.*
 _ignore_*
 env
+AGENTS.md
+LESSONS.md
