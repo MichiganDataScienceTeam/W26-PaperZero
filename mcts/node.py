@@ -5,14 +5,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import math
-from mcts.encoder import ThinkArchitecture
+from mcts.train import get_model
 from mcts.temp_segment_finder import find_segments
 
 from typing import Any, List, Tuple
 import numpy.typing as npt
 
 
-model = ThinkArchitecture(2, 128, 3)
 TRAINING_RECORD_SCHEMA_VERSION = 1
 RASTER_RESOLUTION = 128
 
@@ -68,7 +67,7 @@ class Node:
     def __init__(
         self,
         paper: Paper,
-        parent: "Node | None" = None,
+        parent: Node | None = None,
         segment: Segment | None = None,
         target_mask: npt.NDArray | None = None,
     ):
@@ -107,6 +106,7 @@ class Node:
 
     def expand(self):
         """Make Children"""
+        model = get_model()
         # Generate list of segments
         segments = find_segments(self.paper)
         if len(segments) == 0:
