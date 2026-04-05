@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MCTS Visualizer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="layout">
+      <section class="left">
+        <header class="header-row">
+          <h1>Visualizer</h1>
+          <p id="statusText"></p>
+        </header>
+        <div class="controls">
+          <button id="clearPoints" type="button">Clear Points</button>
+          <button id="applyFold" type="button">Apply Fold</button>
+          <button id="runExpand" type="button">Run Expand</button>
+          <button id="runSelect" type="button">Run Select</button>
+        </div>
+        <canvas id="paperCanvas" width="320" height="320"></canvas>
+        <div class="heatmaps">
+          <canvas id="startCanvas" width="320" height="320"></canvas>
+          <canvas id="endCanvas" width="320" height="320"></canvas>
+        </div>
+      </section>
+
+      <section class="right">
+        <header class="header-row">
+          <h1>Tree</h1>
+          <button id="refreshTree" type="button">Refresh</button>
+        </header>
+        <div id="treeContainer" class="tree-container">
+          <svg id="treeSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="treeTooltip" class="tree-tooltip" hidden></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

@@ -5,3 +5,4 @@ numpy==2.4.0
 torch==2.9.1
 pyparsing==3.2.5
 tqdm==4.67.1
+Flask==3.1.0
