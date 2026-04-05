@@ -95,8 +95,12 @@ class ValueHead(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
         self.network = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=32, kernel_size=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(in_channels**3, out_features=1)
+            nn.Linear(32, out_features=1),
         )
 
     def forward(self, x):
@@ -137,10 +141,13 @@ if __name__ == "__main__":
     img = paper.rasterize(128, 128, 0.0)
     img = np.array(img).reshape(128, 128)
 
-    img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    network = ThinkArchitecture(1, 128, 3)
+    target = np.ones((128, 128), dtype=np.float32)
+    img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0)
+    target_tensor = torch.tensor(target, dtype=torch.float32).unsqueeze(0)
+    state_tensor = torch.cat([img_tensor, target_tensor], dim=0).unsqueeze(0)
+    network = ThinkArchitecture(2, 128, 3)
 
-    policy, value = network(img_tensor)
+    policy, value = network(state_tensor)
     policy_np = policy.detach().squeeze().numpy() 
 
     print(f"Value: {value.item()}")
