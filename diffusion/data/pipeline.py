@@ -178,9 +178,10 @@ def _pack_one(
     slot_valid = torch.zeros(slots, dtype=torch.float32)
     slot_valid[: length + 1] = 1.0
 
+    # TODO: Fix pinning, remove temporary disable
     slot_pin = torch.zeros(slots, dtype=torch.float32)
-    slot_pin[0] = 1.0
-    slot_pin[length] = 1.0
+    # slot_pin[0] = 1.0
+    # slot_pin[length] = 1.0
 
     action_valid = torch.zeros_like(slot_valid)
     action_valid[:-1] = slot_valid[1:]
