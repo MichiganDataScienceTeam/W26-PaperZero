@@ -181,13 +181,13 @@ def _pack_one(
 
     slot_pin = torch.zeros(slots, dtype=torch.float32)
     slot_pin[0] = 1.0
-    slot_pin[length] = 1.0
+    slot_pin[-1] = 1.0
 
     action_valid = torch.zeros_like(slot_valid)
     action_valid[:-1] = slot_valid[1:]
 
     denoise = torch.zeros(slots, token_dim, dtype=torch.float32)
-    denoise[:, :state_dim] = (slot_valid * (1.0 - slot_pin)).unsqueeze(-1)
+    denoise[:, :state_dim] = (1.0 - slot_pin).unsqueeze(-1)
     denoise[:, state_dim:] = action_valid.unsqueeze(-1)
 
     return x_0, denoise, slot_valid, slot_pin
@@ -237,6 +237,9 @@ class PackedTrajectoryDataset(Dataset):
         self.denoise = torch.stack([row[1] for row in packed], dim=0)
         self.slot_valid = torch.stack([row[2] for row in packed], dim=0)
         self.slot_pin = torch.stack([row[3] for row in packed], dim=0)
+        # For endpoint-conditioned generation, inference uses full-horizon validity.
+        # Train with the same validity mask to avoid train/inference mismatch.
+        self.model_slot_valid = torch.ones_like(self.slot_valid)
 
         self.state_dim = _state_dim(cfg)
         self.token_dim = self.state_dim + self.cfg.action_dim
@@ -271,6 +274,11 @@ class PackedTrajectoryDataset(Dataset):
             sigma_t=self.sigmas[t],
             target_type=self.cfg.noise_target,
         )
+        # Keep pinned states noise-free during training.
+        pin_state = self.slot_pin[idx].unsqueeze(-1)
+        x_t[:, : self.state_dim] = (1.0 - pin_state) * x_t[:, : self.state_dim] + pin_state * x_0[:, : self.state_dim]
+        target[:, : self.state_dim] = (1.0 - pin_state) * target[:, : self.state_dim]
+
         loss_weight = torch.tensor(1.0, dtype=torch.float32)
         if self.cfg.min_snr_gamma is not None:
             loss_weight = min_snr_weight(
@@ -279,7 +287,7 @@ class PackedTrajectoryDataset(Dataset):
                 gamma=float(self.cfg.min_snr_gamma),
             ).to(torch.float32)
 
-        return x_t, t, target, self.slot_valid[idx], self.slot_pin[idx], denoise, loss_weight
+        return x_t, t, target, self.model_slot_valid[idx], self.slot_pin[idx], denoise, loss_weight
 
 
 __all__ = [
