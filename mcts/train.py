@@ -140,7 +140,7 @@ def train(data_loader: torch.utils.data.DataLoader, model: ThinkArchitecture):
     print(f"  avg loss: {total_loss / len(data_loader):.4f}")
     return model
 
-def evaluate(testing_nodes: List[Node], num_simulations: int = 15) -> float:
+def evaluate(testing_nodes: List[Node], num_simulations: int = 50) -> float:
     """
     Run MCTS on each test root, greedily walk to the best leaf by Q,
     and return average IoU across all test cases.
