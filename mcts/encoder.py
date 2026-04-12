@@ -1,7 +1,6 @@
 import torch.nn as nn
 from paper import Paper, Segment, Vec2
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 
 
@@ -134,6 +133,8 @@ class ThinkArchitecture(nn.Module):
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
     paper = Paper()
     seg = Segment(Vec2(0.0, 0.0), Vec2(1.0, 1.0))
     fold = paper.fold(seg)
