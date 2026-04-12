@@ -2,18 +2,21 @@ from __future__ import annotations
 
 from paper import Paper, Segment
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 import math
-from mcts.train import get_model
 from mcts.temp_segment_finder import find_segments
 
-from typing import Any, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Tuple
 import numpy.typing as npt
 
+if TYPE_CHECKING:
+    from mcts.encoder import ThinkArchitecture
 
-TRAINING_RECORD_SCHEMA_VERSION = 1
+
+TRAINING_RECORD_SCHEMA_VERSION = 2
 RASTER_RESOLUTION = 128
+POLICY_SPLAT_RADIUS = 2
+POLICY_SPLAT_SIGMA = 0.8
 
 
 def _segment_key(seg: Segment, decimals: int = 6) -> Tuple[float, float, float, float]:
@@ -37,12 +40,13 @@ def _point_to_grid_index(
     min_x, max_x, min_y, max_y = bounds
     span_x = max(max_x - min_x, 1e-12)
     span_y = max(max_y - min_y, 1e-12)
+    scale = min((width - 1) / span_x, (height - 1) / span_y)
 
-    xn = (x - min_x) / span_x
-    yn = (y - min_y) / span_y
+    x_r = (x - min_x) * scale
+    y_r = (height - 1) - (y - min_y) * scale
 
-    xi = min(max(int(round(xn * (width - 1))), 0), width - 1)
-    yi = min(max(int(round(yn * (height - 1))), 0), height - 1)
+    xi = min(max(int(round(x_r)), 0), width - 1)
+    yi = min(max(int(round(y_r)), 0), height - 1)
     return yi, xi
 
 
@@ -50,26 +54,39 @@ def _build_state_tensor(paper: Paper, target_mask: npt.NDArray[np.float32]) -> t
     current = np.array(paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0), dtype=np.float32).reshape(
         RASTER_RESOLUTION, RASTER_RESOLUTION
     )
-    assert target_mask.shape == (
-        RASTER_RESOLUTION,
-        RASTER_RESOLUTION,
-    ), f"target_mask must be {(RASTER_RESOLUTION, RASTER_RESOLUTION)}, got {target_mask.shape}"
     state = np.stack([current, target_mask], axis=0)
-    assert state.shape == (
-        2,
-        RASTER_RESOLUTION,
-        RASTER_RESOLUTION,
-    ), f"state must be {(2, RASTER_RESOLUTION, RASTER_RESOLUTION)}, got {state.shape}"
     return torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+
+
+def _add_gaussian_splat(
+    target: npt.NDArray[np.float32],
+    y_center: int,
+    x_center: int,
+    weight: float,
+    radius: int = POLICY_SPLAT_RADIUS,
+    sigma: float = POLICY_SPLAT_SIGMA,
+) -> None:
+    h, w = target.shape
+    sigma2 = 2.0 * sigma * sigma
+    r2 = float(radius * radius)
+    for y in range(max(0, y_center - radius), min(h - 1, y_center + radius) + 1):
+        for x in range(max(0, x_center - radius), min(w - 1, x_center + radius) + 1):
+            dy = float(y - y_center)
+            dx = float(x - x_center)
+            d2 = dx * dx + dy * dy
+            if d2 > r2:
+                continue
+            target[y, x] += float(weight * np.exp(-d2 / sigma2))
 
 
 class Node:
     def __init__(
         self,
         paper: Paper,
+        model: ThinkArchitecture,
+        target_mask: npt.NDArray,
         parent: Node | None = None,
         segment: Segment | None = None,
-        target_mask: npt.NDArray | None = None,
     ):
         super().__init__()
 
@@ -80,10 +97,7 @@ class Node:
         # data
         self.paper: Paper = paper
         self.segment: Segment | None = segment
-        if target_mask is None:
-            self.target_mask = np.ones((RASTER_RESOLUTION, RASTER_RESOLUTION), dtype=np.float32)
-        else:
-            self.target_mask = np.array(target_mask, dtype=np.float32).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
+        self.target_mask = np.asarray(target_mask, dtype=np.float32).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
         
         self.N = 0      # number of visits
         self.W = 0.0    # sum of all values
@@ -92,21 +106,29 @@ class Node:
         self.action_key: Tuple[float, float, float, float] | None = (
             None if segment is None else _segment_key(segment)
         )
+        self.model = model
+        self.last_policy_target: npt.NDArray[np.float32] | None = None
+        self.last_value_eval: float | None = None
+        self.was_expanded: bool = False
 
         # constants
         self.sumB = None
 
     # For testing purposes
     def render(self):
+        import matplotlib.pyplot as plt
         img = self.paper.rasterize(128, 128, 0.0)
         img = np.array(img)
         plt.imshow(img, cmap="gray", origin="lower")
         plt.text(0, -17, f'Visits: {self.N}\nPrior: {self.P}\nValue: {self.W}', fontsize=12)
         plt.show()
 
-    def expand(self):
-        """Make Children"""
-        model = get_model()
+    def _expand_from_network_outputs(self, policy_logits: torch.Tensor, value_scalar: float) -> None:
+        """Expand using precomputed network outputs for this node state."""
+        self.was_expanded = False
+        self.last_policy_target = None
+        self.last_value_eval = None
+
         # Generate list of segments
         segments = find_segments(self.paper)
         if len(segments) == 0:
@@ -122,25 +144,15 @@ class Node:
             seen.add(key)
             unique_segments.append(seg)
 
-        assert self.target_mask.shape == (
-            RASTER_RESOLUTION,
-            RASTER_RESOLUTION,
-        ), f"target_mask shape mismatch: {self.target_mask.shape}"
-
-        model.eval()
-        with torch.no_grad():
-            img_tensor = _build_state_tensor(self.paper, self.target_mask)
-            policy, value = model(img_tensor)
-
-        policy = policy.squeeze(0)  # (2, H, W)
-
+        policy = policy_logits  # (2, H, W)
         start_logits = policy[0]
-        end_logits   = policy[1]
+        end_logits = policy[1]
 
-        start_probs = torch.softmax(start_logits.flatten(), dim=0).view_as(start_logits)
-        end_probs   = torch.softmax(end_logits.flatten(), dim=0).view_as(end_logits)
+        # Convert to numpy once to avoid repeated tensor indexing overhead in the candidate loop.
+        start_probs = torch.softmax(start_logits.flatten(), dim=0).view_as(start_logits).detach().cpu().numpy()
+        end_probs = torch.softmax(end_logits.flatten(), dim=0).view_as(end_logits).detach().cpu().numpy()
 
-        priors = []
+        candidates: list[tuple[Segment, Paper, float, tuple[int, int, int, int]]] = []
         h, w = start_probs.shape
         min_x, max_x, min_y, max_y = self.paper.compute_bounds()
         bounds = (float(min_x), float(max_x), float(min_y), float(max_y))
@@ -151,41 +163,67 @@ class Node:
             y1, x1 = _point_to_grid_index(float(pt1.x), float(pt1.y), bounds, h, w)
             y2, x2 = _point_to_grid_index(float(pt2.x), float(pt2.y), bounds, h, w)
 
-            pr1 = start_probs[y1, x1]
-            pr2 = end_probs[y2, x2]
+            pr1 = float(start_probs[y1, x1])
+            pr2 = float(end_probs[y2, x2])
+            copyP = self.paper.copy()
+            if not copyP.fold(seg):
+                continue
+            candidates.append((seg, copyP, float(pr1 * pr2), (y1, x1, y2, x2)))
 
-            priors.append((pr1 * pr2).item())
+        if len(candidates) == 0:
+            return
 
-        # Normalize
-        priors = np.array(priors)
-        if len(priors) == 0:
-            priors = np.array([])
-        elif priors.sum() > 0:
-            priors /= priors.sum()
+        raw_priors = np.array([candidate[2] for candidate in candidates], dtype=np.float32)
+        if raw_priors.sum() > 0:
+            priors = raw_priors / raw_priors.sum()
         else:
-            priors = np.ones_like(priors) / len(priors)
+            priors = np.ones_like(raw_priors, dtype=np.float32) / len(raw_priors)
+
+        start_target = np.zeros((h, w), dtype=np.float32)
+        end_target = np.zeros((h, w), dtype=np.float32)
 
         # Create children - expand
-        for i, P in enumerate(priors):
-            copyP = self.paper.copy()
-            if not copyP.fold(unique_segments[i]):
-                continue
+        for i, (seg, folded_paper, _, (y1, x1, y2, x2)) in enumerate(candidates):
             child = Node(
-                paper=copyP,
+                paper=folded_paper,
+                model=self.model,
                 parent=self,
-                segment=unique_segments[i],
+                segment=seg,
                 target_mask=self.target_mask,
             )
-            child.P = P
+            child.P = float(priors[i])
             self.children.append(child)
+            _add_gaussian_splat(start_target, y1, x1, float(priors[i]))
+            _add_gaussian_splat(end_target, y2, x2, float(priors[i]))
+
+        start_sum = float(start_target.sum())
+        end_sum = float(end_target.sum())
+        if start_sum > 0:
+            start_target /= start_sum
+        if end_sum > 0:
+            end_target /= end_sum
+
+        dense_target = np.stack([start_target, end_target], axis=0).astype(np.float32)
+        self.last_policy_target = dense_target
+        self.last_value_eval = float(value_scalar)
+        self.was_expanded = True
     
         # Evaluate & Backprop - update W, N, Q for all visited nodes
         node: Node = self
         while node is not None:
-            node.W += value.item()
+            node.W += value_scalar
             node.N += 1
             node.Q = node.W / node.N
             node = node.parent
+
+    def expand(self):
+        """Make children by running model on current state, then expanding."""
+        self.model.eval()
+        with torch.no_grad():
+            model_device = next(self.model.parameters()).device
+            img_tensor = _build_state_tensor(self.paper, self.target_mask).to(model_device)
+            policy, value = self.model(img_tensor)
+        self._expand_from_network_outputs(policy.squeeze(0), float(value.item()))
 
 
     def select(self, c=1):
@@ -205,25 +243,26 @@ class Node:
     def export_training_record(self) -> dict[str, Any]:
         """
         Stable sample schema for downstream training scripts.
-        This captures the model input state plus action identities.
+        This captures the model input state and dense policy target.
         """
+        if self.last_policy_target is None:
+            raise RuntimeError("Node has no dense policy target. Call expand() and ensure expansion succeeds.")
         state = _build_state_tensor(self.paper, self.target_mask).squeeze(0).cpu().numpy()
-        action_keys = [child.action_key for child in self.children]
-        priors = [float(child.P) for child in self.children]
 
         return {
             "schema_version": TRAINING_RECORD_SCHEMA_VERSION,
             "state": state,
-            "target_mask": np.array(self.target_mask, dtype=np.float32),
-            "action_keys": action_keys,
-            "priors": np.array(priors, dtype=np.float32),
+            "policy_target": np.array(self.last_policy_target, dtype=np.float32),
             "value": float(self.Q),
             "visits": int(self.N),
         }
     
 if __name__ == "__main__":
+    from mcts.encoder import ThinkArchitecture
+
     paper = Paper()
-    root = Node(paper=paper, target_mask=np.ones((128, 128), dtype=np.float32))
+    model = ThinkArchitecture(2, 128, 3)
+    root = Node(paper=paper, model=model, target_mask=np.ones((128, 128), dtype=np.float32))
 
     root.expand()
     new_node = root.select()
