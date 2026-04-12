@@ -69,7 +69,7 @@ def _calculate_iou(mask1: npt.NDArray[np.bool_], mask2: npt.NDArray[np.bool_]) -
         return float(intersection / union) if union > 0 else 0
 
 
-def tree_algo(root: Node, num_simulations: int = 50) -> Node:
+def tree_algo(root: Node, num_simulations: int = 15) -> Node:
     """Select, expand, and backprop."""
     for _ in range(num_simulations):
         node: Node = root
@@ -140,7 +140,7 @@ def train(data_loader: torch.utils.data.DataLoader, model: ThinkArchitecture):
     print(f"  avg loss: {total_loss / len(data_loader):.4f}")
     return model
 
-def evaluate(testing_nodes: List[Node], num_simulations: int = 50) -> float:
+def evaluate(testing_nodes: List[Node], num_simulations: int = 15) -> float:
     """
     Run MCTS on each test root, greedily walk to the best leaf by Q,
     and return average IoU across all test cases.
