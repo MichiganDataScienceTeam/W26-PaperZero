@@ -1,14 +1,15 @@
 """
 Efficient Training
 """
+import random
 import torch
 from torch.utils.data import Dataset, DataLoader
-from paper import Paper, Segment
+from paper import Paper
 import numpy as np
-import matplotlib.pyplot as plt
 from typing import List
 import numpy.typing as npt
 from collections import deque
+from data.origami_sampler import OrigamiSampler
 from mcts.node import Node, RASTER_RESOLUTION
 from mcts.encoder import ThinkArchitecture
 
@@ -42,32 +43,9 @@ class FoldDataset(Dataset):
             value_target = torch.tensor([rec["value"]],      dtype=torch.float32)   # [1]
 
             # Build dense policy targets [2, H, W] from sparse action priors
-            policy_target = self._build_policy_map(rec["action_keys"], rec["priors"])
+            policy_target = torch.tensor(rec["policy_target"], dtype=torch.float32)
 
             self.samples.append((state, policy_target, value_target))
-
-    def _build_policy_map(self, action_keys, priors) -> torch.Tensor:
-        """
-        action_keys : list of (p1x, p1y, p2x, p2y)  -- normalized [0,1] coords
-        priors      : np.ndarray of same length
-        Returns     : [2, H, W] float32 tensor
-                        channel 0 = start-point heatmap
-                        channel 1 = end-point   heatmap
-        """
-        start_map = np.zeros((self.H, self.W), dtype=np.float32)
-        end_map   = np.zeros((self.H, self.W), dtype=np.float32)
-
-        for (p1x, p1y, p2x, p2y), prob in zip(action_keys, priors):
-            # action_keys store raw coords — clamp to grid
-            x1 = min(max(int(round(p1x * (self.W - 1))), 0), self.W - 1)
-            y1 = min(max(int(round(p1y * (self.H - 1))), 0), self.H - 1)
-            x2 = min(max(int(round(p2x * (self.W - 1))), 0), self.W - 1)
-            y2 = min(max(int(round(p2y * (self.H - 1))), 0), self.H - 1)
-
-            start_map[y1, x1] += prob
-            end_map  [y2, x2] += prob
-
-        return torch.tensor(np.stack([start_map, end_map]), dtype=torch.float32)  # [2,H,W]
 
     def __len__(self):
         return len(self.samples)
@@ -91,18 +69,20 @@ def _calculate_iou(mask1: npt.NDArray[np.bool_], mask2: npt.NDArray[np.bool_]) -
         return float(intersection / union) if union > 0 else 0
 
 
-def tree_algo(root: Node, num_simulations: int = 50):
+def tree_algo(root: Node, num_simulations: int = 50) -> Node:
     """Select, expand, and backprop."""
-    node = root
     for _ in range(num_simulations):
-        next_node = node
+        node: Node = root
+        next_node: Node = node
         depth = 0
         iou = 0
 
         # run fixed number of times
-        while depth < 15 and iou >= 0.9: 
+        while depth < 15 and iou < 0.9: 
             # expand (evaluate + backdrop are within this call)
-            node.expand()
+            if not node.children:
+                node.expand()
+                break
     
             # select
             next = node.select()
@@ -114,7 +94,7 @@ def tree_algo(root: Node, num_simulations: int = 50):
             depth += 1
 
             # iou calculation
-            iou = _calculate_iou(node.target_mask.astype(bool), node.parent.rasterize(128, 128).astype(bool))
+            iou = _calculate_iou(node.target_mask.astype(bool), node.paper.rasterize(128, 128, 0.0).astype(bool))
 
         node = next_node.select()
     
@@ -124,21 +104,16 @@ def tree_algo(root: Node, num_simulations: int = 50):
 def train(data_loader: torch.utils.data.DataLoader, model: ThinkArchitecture):
     """
     Update weights.
+    Train epoch = 1
 
     data_loader: DataLoader providing batches of input data and corresponding labels.
+    """ 
+    # move to GPU if available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
-    Description:
-        This function sets the model to training mode and use the data loader to iterate through the entire dataset.
-        For each batch, it performs the following steps:
-        1. Resets the gradient calculations in the optimizer.
-        2. Performs a forward pass to get the model predictions.
-        3. Computes the loss between predictions and true labels using the specified `criterion`.
-        4. Performs a backward pass to calculate gradients.
-        5. Updates the model weights using the `optimizer`.
-    """
     # use Q to propigate for value
-    # TODO Need to get which grid square the prior corresponds to for policy head 
-
+    # TODO Need to get which grid square the prior corresponds to for policy head
     model.train()
     policy_criterion = torch.nn.MSELoss()
     value_criterion  = torch.nn.MSELoss()
@@ -146,6 +121,10 @@ def train(data_loader: torch.utils.data.DataLoader, model: ThinkArchitecture):
 
     total_loss = 0.0
     for state, policy_target, value_target in data_loader:
+        state = state.to(device)
+        policy_target = policy_target.to(device)
+        value_target = value_target.to(device)
+
         optimizer.zero_grad()
 
         policy_pred, value_pred = model(state)          # [B,2,H,W],  [B,1]
@@ -161,10 +140,47 @@ def train(data_loader: torch.utils.data.DataLoader, model: ThinkArchitecture):
     print(f"  avg loss: {total_loss / len(data_loader):.4f}")
     return model
 
+def evaluate(testing_nodes: List[Node], num_simulations: int = 50) -> float:
+    """
+    Run MCTS on each test root, greedily walk to the best leaf by Q,
+    and return average IoU across all test cases.
+    """
+    ious = []
+    for root in testing_nodes:
+        searched = tree_algo(root, num_simulations=num_simulations)
+
+        # Greedily always take highest-Q child
+        node = searched
+        while node.children:
+            node = node.select(c=0)
+
+        final_mask = (
+            np.array(node.paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0),
+                     dtype=np.float32)
+            .reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
+            .astype(bool)
+        )
+        ious.append(_calculate_iou(node.target_mask.astype(bool), final_mask))
+
+    avg = float(np.mean(ious))
+    print(f"  avg IoU over {len(testing_nodes)} test cases: {avg:.4f}")
+    return avg
+
 def main():
     # Generate Roots/Target Masks
+    sampler: OrigamiSampler = OrigamiSampler()
     training_nodes: List[Node] = []
     testing_nodes: List[Node] = []
+
+    total_datasize = 100
+    for _ in range(int(0.7 * total_datasize)):
+        paper = sampler.sample(random.randint(1, 3))["final_paper"]
+        target_mask = paper.rasterize(128, 128).astype(bool)
+        training_nodes.append(Node(Paper(), model, target_mask))
+    for _ in range(int(0.3 * total_datasize)):
+        paper = sampler.sample(random.randint(1, 3))["final_paper"]
+        target_mask = paper.rasterize(128, 128).astype(bool)
+        testing_nodes.append(Node(Paper(), model, target_mask))
 
     buffer = deque() 
     buffer_size = 15
@@ -177,8 +193,9 @@ def main():
         buffer.clear()
 
         # Populate buffer
-        for i in range(buffer_size):
-            buffer.append(tree_algo(training_nodes[i]).export_training_record())
+        train_set = random.sample(training_nodes, k=buffer_size) 
+        for train_node in train_set:
+            buffer.append(tree_algo(train_node).export_training_record())
 
         # Create a DataLoader
         batch = FoldDataset(list(buffer))
@@ -189,8 +206,7 @@ def main():
         
     
     # Evaluate Our Model
-    # Run our tree algo and get the final leaf node for each testing_node
-    # Calculate averge IOU? and print it out
+    evaluate(testing_nodes)
 
 
 if __name__ == "__main__":
