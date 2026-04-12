@@ -5,22 +5,49 @@ const state = {
   selectedNodeId: "root",
   selectedNode: null,
   foldPoints: [],
+  checkpoints: [],
+  loadedCheckpoint: null,
 };
 
-const treeSvg = document.getElementById("treeSvg");
-const treeTooltip = document.getElementById("treeTooltip");
-const statusText = document.getElementById("statusText");
-const paperCanvas = document.getElementById("paperCanvas");
-const startCanvas = document.getElementById("startCanvas");
-const endCanvas = document.getElementById("endCanvas");
+const el = {
+  treeSvg: document.getElementById("treeSvg"),
+  treeTooltip: document.getElementById("treeTooltip"),
+  statusText: document.getElementById("statusText"),
+  paperCanvas: document.getElementById("paperCanvas"),
+  startCanvas: document.getElementById("startCanvas"),
+  endCanvas: document.getElementById("endCanvas"),
+  checkpointSelect: document.getElementById("checkpointSelect"),
+  refreshCheckpoints: document.getElementById("refreshCheckpoints"),
+  loadCheckpoint: document.getElementById("loadCheckpoint"),
+  refreshTree: document.getElementById("refreshTree"),
+  clearPoints: document.getElementById("clearPoints"),
+  applyFold: document.getElementById("applyFold"),
+  runExpand: document.getElementById("runExpand"),
+  runSelect: document.getElementById("runSelect"),
+};
 
-const paperCtx = paperCanvas.getContext("2d");
-const startCtx = startCanvas.getContext("2d");
-const endCtx = endCanvas.getContext("2d");
+const paperCtx = el.paperCanvas.getContext("2d");
+const startCtx = el.startCanvas.getContext("2d");
+const endCtx = el.endCanvas.getContext("2d");
 
 function setStatus(text, isError = false) {
-  statusText.textContent = text;
-  statusText.style.color = isError ? "#a32020" : "#5a5a5a";
+  el.statusText.textContent = text;
+  el.statusText.style.color = isError ? "#a32020" : "#5a5a5a";
+}
+
+async function apiJson(url, options = undefined, label = "Request") {
+  const res = await fetch(url, options);
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`${label} failed (${res.status}): non-JSON response`);
+  }
+
+  if (!res.ok) {
+    throw new Error(body.error || `${label} failed (${res.status})`);
+  }
+  return body;
 }
 
 function drawMaskIntoRect(ctx, mask, rect) {
@@ -62,18 +89,42 @@ function getPaperRect(canvas) {
   };
 }
 
+function drawFoldOverlay() {
+  if (state.foldPoints.length === 0) {
+    return;
+  }
+
+  paperCtx.save();
+  paperCtx.strokeStyle = "#0057d8";
+  paperCtx.fillStyle = "#0057d8";
+  paperCtx.lineWidth = 2;
+
+  for (const p of state.foldPoints) {
+    paperCtx.beginPath();
+    paperCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    paperCtx.fill();
+  }
+
+  if (state.foldPoints.length === 2) {
+    paperCtx.beginPath();
+    paperCtx.moveTo(state.foldPoints[0].x, state.foldPoints[0].y);
+    paperCtx.lineTo(state.foldPoints[1].x, state.foldPoints[1].y);
+    paperCtx.stroke();
+  }
+
+  paperCtx.restore();
+}
+
 function drawFoldSelector(mask) {
-  paperCtx.clearRect(0, 0, paperCanvas.width, paperCanvas.height);
-
+  paperCtx.clearRect(0, 0, el.paperCanvas.width, el.paperCanvas.height);
   paperCtx.fillStyle = "#000000";
-  paperCtx.fillRect(0, 0, paperCanvas.width, paperCanvas.height);
+  paperCtx.fillRect(0, 0, el.paperCanvas.width, el.paperCanvas.height);
 
-  const paperRect = getPaperRect(paperCanvas);
+  const paperRect = getPaperRect(el.paperCanvas);
   paperCtx.fillStyle = "#ffffff";
   paperCtx.fillRect(paperRect.x, paperRect.y, paperRect.w, paperRect.h);
 
   drawMaskIntoRect(paperCtx, mask, paperRect);
-
   paperCtx.strokeStyle = "#8d8d8d";
   paperCtx.lineWidth = 1;
   paperCtx.strokeRect(paperRect.x + 0.5, paperRect.y + 0.5, paperRect.w - 1, paperRect.h - 1);
@@ -129,32 +180,6 @@ function drawHeatmap(ctx, map) {
   ctx.drawImage(offscreen, 0, 0, ctx.canvas.width, ctx.canvas.height);
 }
 
-function drawFoldOverlay() {
-  const points = state.foldPoints;
-  if (points.length === 0) {
-    return;
-  }
-
-  paperCtx.save();
-  paperCtx.strokeStyle = "#0057d8";
-  paperCtx.fillStyle = "#0057d8";
-  paperCtx.lineWidth = 2;
-
-  for (const p of points) {
-    paperCtx.beginPath();
-    paperCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-    paperCtx.fill();
-  }
-
-  if (points.length === 2) {
-    paperCtx.beginPath();
-    paperCtx.moveTo(points[0].x, points[0].y);
-    paperCtx.lineTo(points[1].x, points[1].y);
-    paperCtx.stroke();
-  }
-  paperCtx.restore();
-}
-
 function maskToDataUrl(mask) {
   const h = mask.length;
   const w = h > 0 ? mask[0].length : 0;
@@ -184,24 +209,6 @@ function maskToDataUrl(mask) {
   return canvas.toDataURL("image/png");
 }
 
-async function fetchNode(nodeId) {
-  const res = await fetch(`/api/node/${encodeURIComponent(nodeId)}`);
-  if (!res.ok) {
-    throw new Error(`Node request failed (${res.status})`);
-  }
-
-  const node = await res.json();
-  state.selectedNode = node;
-  state.selectedNodeId = node.id;
-  state.foldPoints = [];
-
-  drawFoldSelector(node.paper_mask);
-  drawHeatmap(startCtx, node.nn.start_map);
-  drawHeatmap(endCtx, node.nn.end_map);
-
-  setStatus("Selected node.");
-}
-
 function flattenTree(root) {
   const nodes = [];
   const links = [];
@@ -229,13 +236,15 @@ function flattenTree(root) {
 
   walk(root, 0);
 
-  const maxDepth = nodes.reduce((m, n) => Math.max(m, n.depth), 0);
-  const maxX = nodes.reduce((m, n) => Math.max(m, n.x), 0);
-
-  return { nodes, links, maxDepth, maxX };
+  return {
+    nodes,
+    links,
+    maxDepth: nodes.reduce((m, n) => Math.max(m, n.depth), 0),
+    maxX: nodes.reduce((m, n) => Math.max(m, n.x), 0),
+  };
 }
 
-function el(name, attrs = {}) {
+function makeSvg(name, attrs = {}) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", name);
   Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, String(v)));
   return node;
@@ -252,14 +261,14 @@ function tooltipForNode(node) {
 }
 
 function showTooltip(text, clientX, clientY) {
-  treeTooltip.textContent = text;
-  treeTooltip.hidden = false;
-  treeTooltip.style.left = `${clientX + 10}px`;
-  treeTooltip.style.top = `${clientY + 10}px`;
+  el.treeTooltip.textContent = text;
+  el.treeTooltip.hidden = false;
+  el.treeTooltip.style.left = `${clientX + 10}px`;
+  el.treeTooltip.style.top = `${clientY + 10}px`;
 }
 
 function hideTooltip() {
-  treeTooltip.hidden = true;
+  el.treeTooltip.hidden = true;
 }
 
 function renderTree() {
@@ -279,10 +288,10 @@ function renderTree() {
   const width = Math.max(420, (maxX + 1) * dx + margin * 2);
   const height = Math.max(260, (maxDepth + 1) * dy + margin * 2);
 
-  treeSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  treeSvg.setAttribute("width", width);
-  treeSvg.setAttribute("height", height);
-  treeSvg.innerHTML = "";
+  el.treeSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  el.treeSvg.setAttribute("width", width);
+  el.treeSvg.setAttribute("height", height);
+  el.treeSvg.innerHTML = "";
 
   const positions = new Map();
   for (const node of nodes) {
@@ -306,32 +315,34 @@ function renderTree() {
     const y2 = child.py - nodeH / 2;
     const my = (y1 + y2) / 2;
 
-    treeSvg.append(el("path", {
-      class: "tree-link",
-      d: `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`,
-    }));
+    el.treeSvg.append(
+      makeSvg("path", {
+        class: "tree-link",
+        d: `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`,
+      })
+    );
   }
 
   for (const node of nodes) {
     const pos = positions.get(node.id);
-    const group = el("g", { class: "tree-node", transform: `translate(${pos.px}, ${pos.py})` });
+    const group = makeSvg("g", { class: "tree-node", transform: `translate(${pos.px}, ${pos.py})` });
 
     if (node.id === state.selectedNodeId) {
       group.classList.add("active");
     }
 
-    group.append(el("rect", {
-      x: -nodeW / 2,
-      y: -nodeH / 2,
-      width: nodeW,
-      height: nodeH,
-      rx: 0,
-      ry: 0,
-    }));
+    group.append(
+      makeSvg("rect", {
+        x: -nodeW / 2,
+        y: -nodeH / 2,
+        width: nodeW,
+        height: nodeH,
+      })
+    );
 
     const imageHref = maskToDataUrl(node.preview_mask || []);
     if (imageHref) {
-      const image = el("image", {
+      const image = makeSvg("image", {
         x: -thumb / 2,
         y: -thumb / 2,
         width: thumb,
@@ -345,16 +356,18 @@ function renderTree() {
 
     if ((node.unvisited_children || 0) > 0) {
       const badgeText = `+${node.unvisited_children}`;
-      group.append(el("rect", {
-        x: nodeW / 2 - 24,
-        y: -nodeH / 2 + 4,
-        width: 20,
-        height: 12,
-        fill: "#f0f0f0",
-        stroke: "#7f7f7f",
-        "stroke-width": 1,
-      }));
-      const t = el("text", {
+      group.append(
+        makeSvg("rect", {
+          x: nodeW / 2 - 24,
+          y: -nodeH / 2 + 4,
+          width: 20,
+          height: 12,
+          fill: "#f0f0f0",
+          stroke: "#7f7f7f",
+          "stroke-width": 1,
+        })
+      );
+      const t = makeSvg("text", {
         class: "tree-badge",
         x: nodeW / 2 - 14,
         y: -nodeH / 2 + 13,
@@ -365,21 +378,62 @@ function renderTree() {
     }
 
     group.style.cursor = "pointer";
-    group.addEventListener("mouseenter", (event) => {
-      showTooltip(tooltipForNode(node), event.clientX, event.clientY);
-    });
-    group.addEventListener("mousemove", (event) => {
-      showTooltip(tooltipForNode(node), event.clientX, event.clientY);
-    });
-    group.addEventListener("mouseleave", () => {
-      hideTooltip();
-    });
-    group.addEventListener("click", () => {
-      fetchNode(node.id).then(() => renderTree()).catch((err) => setStatus(err.message, true));
+    group.addEventListener("mouseenter", (event) => showTooltip(tooltipForNode(node), event.clientX, event.clientY));
+    group.addEventListener("mousemove", (event) => showTooltip(tooltipForNode(node), event.clientX, event.clientY));
+    group.addEventListener("mouseleave", hideTooltip);
+    group.addEventListener("click", async () => {
+      try {
+        await fetchNode(node.id);
+        renderTree();
+      } catch (err) {
+        setStatus(err.message, true);
+      }
     });
 
-    treeSvg.append(group);
+    el.treeSvg.append(group);
   }
+}
+
+function canvasToPaperCoords(px, py, canvas, bounds) {
+  const [minX, maxX, minY, maxY] = bounds || [0, 1, 0, 1];
+  const rect = getPaperRect(canvas);
+  const rows = state.selectedNode?.paper_mask?.length || 128;
+  const cols = rows > 0 ? (state.selectedNode.paper_mask[0]?.length || 128) : 128;
+
+  // Canvas point -> raster pixel coordinates.
+  const xr = ((px - rect.x) / rect.w) * (cols - 1);
+  const yr = ((py - rect.y) / rect.h) * (rows - 1);
+
+  // Invert C++ Rasterizer::to_raster (theta=0):
+  // x_r = (x - min_x) * scale
+  // y_r = (rows - 1) - (y - min_y) * scale
+  const spanX = Math.max(maxX - minX, 1e-12);
+  const spanY = Math.max(maxY - minY, 1e-12);
+  const scale = Math.min((cols - 1) / spanX, (rows - 1) / spanY);
+
+  return {
+    x: minX + xr / scale,
+    y: minY + ((rows - 1) - yr) / scale,
+  };
+}
+
+async function refreshTree() {
+  state.tree = await apiJson("/api/tree", undefined, "Tree fetch");
+  renderTree();
+}
+
+async function fetchNode(nodeId) {
+  const node = await apiJson(`/api/node/${encodeURIComponent(nodeId)}`, undefined, "Node fetch");
+  state.selectedNode = node;
+  state.selectedNodeId = node.id;
+  state.foldPoints = [];
+
+  drawFoldSelector(node.paper_mask);
+  drawHeatmap(startCtx, node.nn.start_map);
+  drawHeatmap(endCtx, node.nn.end_map);
+
+  const ckpt = node.checkpoint ? node.checkpoint.split("/").pop() : "random init";
+  setStatus(`Selected node. Model: ${ckpt}`);
 }
 
 async function runNodeAction(endpoint, label) {
@@ -387,13 +441,17 @@ async function runNodeAction(endpoint, label) {
     throw new Error("Select a node first.");
   }
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ node_id: state.selectedNodeId }),
-  });
-  const data = await res.json();
-  if (!res.ok || !data.ok) {
+  const data = await apiJson(
+    endpoint,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: state.selectedNodeId }),
+    },
+    label
+  );
+
+  if (!data.ok) {
     throw new Error(data.error || `${label} failed`);
   }
 
@@ -404,36 +462,11 @@ async function runNodeAction(endpoint, label) {
     await fetchNode(data.selected_node_id);
     renderTree();
   } else if (data.selected_visible === false) {
-    setStatus(`${label} ran. Selected child is currently hidden (unvisited).`);
+    setStatus(`${label} ran. Selected child is hidden (unvisited).`);
     return;
   }
 
   setStatus(`${label} ran.`);
-}
-
-function canvasToPaperCoords(px, py, canvas, bounds) {
-  const [minX, maxX, minY, maxY] = bounds || [0, 1, 0, 1];
-  const nx = (canvas.width - px) / canvas.width;
-  const ny = py / canvas.height;
-
-  const scale = 1 - 2 * PAPER_MARGIN;
-  const ux = (nx - PAPER_MARGIN) / scale;
-  const uy = (ny - PAPER_MARGIN) / scale;
-
-  return {
-    x: minX + ux * (maxX - minX),
-    y: minY + uy * (maxY - minY),
-  };
-}
-
-async function refreshTree() {
-  const res = await fetch("/api/tree");
-  if (!res.ok) {
-    throw new Error(`Tree request failed (${res.status})`);
-  }
-
-  state.tree = await res.json();
-  renderTree();
 }
 
 async function applyFold() {
@@ -447,24 +480,27 @@ async function applyFold() {
   const p1 = canvasToPaperCoords(
     state.foldPoints[0].x,
     state.foldPoints[0].y,
-    paperCanvas,
+    el.paperCanvas,
     state.selectedNode.bounds
   );
   const p2 = canvasToPaperCoords(
     state.foldPoints[1].x,
     state.foldPoints[1].y,
-    paperCanvas,
+    el.paperCanvas,
     state.selectedNode.bounds
   );
 
-  const res = await fetch("/api/fold", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ node_id: state.selectedNodeId, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }),
-  });
+  const data = await apiJson(
+    "/api/fold",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: state.selectedNodeId, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }),
+    },
+    "Fold"
+  );
 
-  const data = await res.json();
-  if (!res.ok || !data.ok) {
+  if (!data.ok) {
     throw new Error(data.error || "Fold failed");
   }
 
@@ -479,55 +515,148 @@ async function applyFold() {
   setStatus("Fold applied.");
 }
 
-paperCanvas.addEventListener("click", (event) => {
-  if (!state.selectedNode) {
-    return;
+function renderCheckpointSelect() {
+  el.checkpointSelect.innerHTML = "";
+
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = state.checkpoints.length === 0 ? "No checkpoints found" : "Select checkpoint...";
+  el.checkpointSelect.append(blank);
+
+  for (const ckpt of state.checkpoints) {
+    const opt = document.createElement("option");
+    opt.value = ckpt.name;
+    opt.textContent = ckpt.loaded ? `${ckpt.name} (loaded)` : ckpt.name;
+    if (ckpt.loaded) {
+      opt.selected = true;
+    }
+    el.checkpointSelect.append(opt);
   }
 
-  const rect = paperCanvas.getBoundingClientRect();
-  const x = ((event.clientX - rect.left) / rect.width) * paperCanvas.width;
-  const y = ((event.clientY - rect.top) / rect.height) * paperCanvas.height;
+  el.loadCheckpoint.disabled = state.checkpoints.length === 0;
+}
 
-  if (state.foldPoints.length >= 2) {
-    state.foldPoints = [];
+async function refreshCheckpoints() {
+  const payload = await apiJson("/api/checkpoints", undefined, "Checkpoint list");
+  state.checkpoints = payload.checkpoints || [];
+  state.loadedCheckpoint = payload.loaded_checkpoint || null;
+  renderCheckpointSelect();
+}
+
+async function loadSelectedCheckpoint() {
+  const name = el.checkpointSelect.value;
+  if (!name) {
+    throw new Error("Select a checkpoint first.");
   }
 
-  state.foldPoints.push({ x, y });
-  drawFoldSelector(state.selectedNode.paper_mask);
-});
+  const payload = await apiJson(
+    "/api/checkpoints/load",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+    "Checkpoint load"
+  );
 
-document.getElementById("refreshTree").addEventListener("click", () => {
-  refreshTree()
-    .then(() => fetchNode(state.selectedNodeId))
-    .catch(async () => {
+  if (!payload.ok) {
+    throw new Error(payload.error || "Checkpoint load failed");
+  }
+
+  state.checkpoints = payload.checkpoints || [];
+  state.loadedCheckpoint = payload.loaded_checkpoint || null;
+  renderCheckpointSelect();
+
+  if (state.selectedNodeId) {
+    await fetchNode(state.selectedNodeId);
+    renderTree();
+  }
+
+  const loadedName = state.loadedCheckpoint ? state.loadedCheckpoint.split("/").pop() : name;
+  setStatus(`Loaded checkpoint: ${loadedName}`);
+}
+
+function bindEvents() {
+  el.paperCanvas.addEventListener("click", (event) => {
+    if (!state.selectedNode) {
+      return;
+    }
+
+    const rect = el.paperCanvas.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * el.paperCanvas.width;
+    const y = ((event.clientY - rect.top) / rect.height) * el.paperCanvas.height;
+
+    if (state.foldPoints.length >= 2) {
+      state.foldPoints = [];
+    }
+    state.foldPoints.push({ x, y });
+    drawFoldSelector(state.selectedNode.paper_mask);
+  });
+
+  el.refreshTree.addEventListener("click", async () => {
+    try {
+      await refreshTree();
+      await fetchNode(state.selectedNodeId || "root");
+    } catch {
       await fetchNode("root");
       await refreshTree();
-    })
-    .catch((err) => setStatus(err.message, true));
-});
+    }
+  });
 
-document.getElementById("clearPoints").addEventListener("click", () => {
-  state.foldPoints = [];
-  if (state.selectedNode) {
-    drawFoldSelector(state.selectedNode.paper_mask);
-  }
-  setStatus("Points cleared.");
-});
+  el.clearPoints.addEventListener("click", () => {
+    state.foldPoints = [];
+    if (state.selectedNode) {
+      drawFoldSelector(state.selectedNode.paper_mask);
+    }
+    setStatus("Points cleared.");
+  });
 
-document.getElementById("applyFold").addEventListener("click", () => {
-  applyFold().catch((err) => setStatus(err.message, true));
-});
+  el.applyFold.addEventListener("click", async () => {
+    try {
+      await applyFold();
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
 
-document.getElementById("runExpand").addEventListener("click", () => {
-  runNodeAction("/api/expand", "Expand").catch((err) => setStatus(err.message, true));
-});
+  el.runExpand.addEventListener("click", async () => {
+    try {
+      await runNodeAction("/api/expand", "Expand");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
 
-document.getElementById("runSelect").addEventListener("click", () => {
-  runNodeAction("/api/select", "Select").catch((err) => setStatus(err.message, true));
-});
+  el.runSelect.addEventListener("click", async () => {
+    try {
+      await runNodeAction("/api/select", "Select");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+
+  el.refreshCheckpoints.addEventListener("click", async () => {
+    try {
+      await refreshCheckpoints();
+      setStatus("Checkpoint list refreshed.");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+
+  el.loadCheckpoint.addEventListener("click", async () => {
+    try {
+      await loadSelectedCheckpoint();
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+}
 
 async function init() {
   try {
+    bindEvents();
+    await refreshCheckpoints();
     await refreshTree();
     await fetchNode(state.selectedNodeId);
     renderTree();

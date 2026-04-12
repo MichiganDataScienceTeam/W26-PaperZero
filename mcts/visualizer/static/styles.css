@@ -73,6 +73,29 @@ canvas {
   flex-wrap: wrap;
 }
 
+.checkpoint-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.checkpoint-row label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.checkpoint-row select {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: #fff;
+  color: #111;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+}
+
 button {
   border: 1px solid #1f1f1f;
   border-radius: 0;

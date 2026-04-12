@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -16,10 +17,9 @@ from mcts.encoder import ThinkArchitecture
 
 
 RESOLUTION = 128
+CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
+AUTOLOAD_LATEST_CHECKPOINT = True
 app = Flask(__name__)
-_TREE_ROOT: Any | None = None
-_DEFAULT_ROOT: _BlankNode | None = None
-_NETWORK: ThinkArchitecture | None = None
 
 
 @dataclass
@@ -55,28 +55,49 @@ class _DemoNode:
     children: list[Any] = field(default_factory=list)
 
 
-def set_tree_root(root: Any | None) -> None:
-    """Register the current MCTS root node to visualize."""
-    global _TREE_ROOT
-    _TREE_ROOT = root
+@dataclass
+class _VisualizerState:
+    tree_root: Any | None = None
+    default_root: Any | None = None
+    network: ThinkArchitecture | None = None
+    device: torch.device | None = None
+    loaded_checkpoint: str | None = None
+
+
+_STATE = _VisualizerState()
+
+
+def _get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _empty_mask() -> np.ndarray:
+    return np.zeros((RESOLUTION, RESOLUTION), dtype=np.float32)
 
 
 def _make_default_root() -> Any:
     try:
         from mcts.node import Node
-
-        return Node(Paper(), target_mask=np.ones((RESOLUTION, RESOLUTION), dtype=np.float32))
+        net = _ensure_network()
+        return Node(Paper(), model=net, target_mask=np.ones((RESOLUTION, RESOLUTION), dtype=np.float32))
     except Exception:
         return _BlankNode()
 
 
+def set_tree_root(root: Any | None) -> None:
+    _STATE.tree_root = root
+
+
 def _current_root() -> Any:
-    global _DEFAULT_ROOT
-    if _TREE_ROOT is not None:
-        return _TREE_ROOT
-    if _DEFAULT_ROOT is None:
-        _DEFAULT_ROOT = _make_default_root()
-    return _DEFAULT_ROOT
+    if _STATE.tree_root is not None:
+        return _STATE.tree_root
+    if _STATE.default_root is None:
+        _STATE.default_root = _make_default_root()
+    return _STATE.default_root
 
 
 def _is_visited(node: Any) -> bool:
@@ -84,21 +105,26 @@ def _is_visited(node: Any) -> bool:
 
 
 def _ensure_network() -> ThinkArchitecture:
-    global _NETWORK
-    if _NETWORK is None:
-        _NETWORK = ThinkArchitecture(2, 128, 3)
-        _NETWORK.eval()
-    return _NETWORK
+    if _STATE.network is None:
+        _STATE.device = _get_device()
+        net = ThinkArchitecture(2, 128, 3)
+        net.to(_STATE.device)
+        net.eval()
+        _STATE.network = net
 
-
-def _empty_mask() -> np.ndarray:
-    return np.zeros((RESOLUTION, RESOLUTION), dtype=np.float32)
+        if AUTOLOAD_LATEST_CHECKPOINT:
+            latest = _latest_checkpoint_path()
+            if latest is not None:
+                try:
+                    _load_checkpoint(latest)
+                except Exception:
+                    pass
+    return _STATE.network
 
 
 def _paper_mask(paper: Any | None) -> np.ndarray:
     if paper is None:
         return _empty_mask()
-
     raster = np.array(paper.rasterize(RESOLUTION, RESOLUTION, 0.0), dtype=np.float32)
     return raster.reshape(RESOLUTION, RESOLUTION)
 
@@ -117,28 +143,6 @@ def _target_mask(node: Any) -> np.ndarray:
     return arr
 
 
-def _nn_outputs(mask: np.ndarray, target_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    net = _ensure_network()
-
-    with torch.no_grad():
-        stacked = np.stack([mask, target_mask], axis=0)
-        image = torch.tensor(stacked, dtype=torch.float32).unsqueeze(0)
-        policy, value = net(image)
-
-        policy = policy.squeeze(0)
-        start_logits = policy[0]
-        end_logits = policy[1]
-
-        start_probs = torch.softmax(start_logits.flatten(), dim=0).view_as(start_logits)
-        end_probs = torch.softmax(end_logits.flatten(), dim=0).view_as(end_logits)
-
-    return (
-        start_probs.cpu().numpy().astype(np.float32),
-        end_probs.cpu().numpy().astype(np.float32),
-        float(value.item()),
-    )
-
-
 def _paper_bounds(paper: Any | None) -> list[float]:
     if paper is None:
         return [0.0, 1.0, 0.0, 1.0]
@@ -155,6 +159,27 @@ def _paper_bounds(paper: Any | None) -> list[float]:
     return [0.0, 1.0, 0.0, 1.0]
 
 
+def _nn_outputs(mask: np.ndarray, target_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    net = _ensure_network()
+    device = next(net.parameters()).device
+
+    with torch.no_grad():
+        stacked = np.stack([mask, target_mask], axis=0)
+        image = torch.tensor(stacked, dtype=torch.float32, device=device).unsqueeze(0)
+        policy, value = net(image)
+        policy = policy.squeeze(0)
+        start_logits = policy[0]
+        end_logits = policy[1]
+        start_probs = torch.softmax(start_logits.flatten(), dim=0).view_as(start_logits)
+        end_probs = torch.softmax(end_logits.flatten(), dim=0).view_as(end_logits)
+
+    return (
+        start_probs.detach().cpu().numpy().astype(np.float32),
+        end_probs.detach().cpu().numpy().astype(np.float32),
+        float(value.item()),
+    )
+
+
 def _to_tree_view(root: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     node_lookup: dict[str, Any] = {}
 
@@ -164,25 +189,30 @@ def _to_tree_view(root: Any) -> tuple[dict[str, Any], dict[str, Any]]:
             return None
 
         children = getattr(node, "children", []) or []
-        visited_children = [child for child in children if _is_visited(child)]
-
         tree_children: list[dict[str, Any]] = []
-        for idx, child in enumerate(visited_children):
+        visited_children_count = 0
+
+        # Keep stable IDs by preserving original child index.
+        for idx, child in enumerate(children):
+            if not _is_visited(child):
+                continue
             child_id = f"{node_id}.{idx}"
             child_view = build(child, child_id)
             if child_view is not None:
                 tree_children.append(child_view)
+                visited_children_count += 1
 
         node_lookup[node_id] = node
         paper = getattr(node, "paper", None)
         preview = _paper_mask(paper)
+
         return {
             "id": node_id,
             "visits": int(getattr(node, "N", 0)),
             "value_sum": float(getattr(node, "W", 0.0)),
             "q": float(getattr(node, "Q", 0.0)),
             "prior": float(getattr(node, "P", 0.0)),
-            "unvisited_children": len(children) - len(visited_children),
+            "unvisited_children": len(children) - visited_children_count,
             "bounds": _paper_bounds(paper),
             "preview_mask": preview.tolist(),
             "children": tree_children,
@@ -191,6 +221,12 @@ def _to_tree_view(root: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     tree = build(root, "root", force_include=True)
     assert tree is not None
     return tree, node_lookup
+
+
+def _resolve_node(node_id: str) -> Any | None:
+    root = _current_root()
+    _, lookup = _to_tree_view(root)
+    return lookup.get(node_id)
 
 
 def _node_payload(node: Any, node_id: str) -> dict[str, Any]:
@@ -213,21 +249,19 @@ def _node_payload(node: Any, node_id: str) -> dict[str, Any]:
             "end_map": end_map.tolist(),
             "value_estimate": value_estimate,
         },
+        "checkpoint": _STATE.loaded_checkpoint,
     }
-
-
-def _resolve_node(node_id: str) -> Any | None:
-    root = _current_root()
-    _, lookup = _to_tree_view(root)
-    return lookup.get(node_id)
 
 
 def _make_child(parent: Any, folded_paper: Any) -> Any:
     parent_cls = type(parent)
     parent_target = _target_mask(parent)
+    parent_model = getattr(parent, "model", None)
+    if parent_model is None:
+        parent_model = _ensure_network()
 
     try:
-        child = parent_cls(paper=folded_paper, parent=parent, target_mask=parent_target)
+        child = parent_cls(paper=folded_paper, model=parent_model, parent=parent, target_mask=parent_target)
     except TypeError:
         try:
             child = parent_cls(folded_paper, parent)
@@ -240,6 +274,8 @@ def _make_child(parent: Any, folded_paper: Any) -> Any:
     child.parent = parent
     child.paper = folded_paper
     child.target_mask = np.array(parent_target, dtype=np.float32)
+    if hasattr(parent, "model"):
+        child.model = getattr(parent, "model")
 
     child.P = float(getattr(child, "P", 0.0))
     child.N = int(getattr(child, "N", 0))
@@ -263,6 +299,68 @@ def _backprop_after_manual_fold(parent: Any, child: Any, value_estimate: float) 
         cursor = getattr(cursor, "parent", None)
 
 
+def _list_checkpoints() -> list[dict[str, Any]]:
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    out: list[dict[str, Any]] = []
+    for path in sorted(CHECKPOINT_DIR.glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True):
+        out.append(
+            {
+                "name": path.name,
+                "path": str(path.resolve()),
+                "mtime": float(path.stat().st_mtime),
+                "loaded": str(path.resolve()) == _STATE.loaded_checkpoint,
+            }
+        )
+    return out
+
+
+def _latest_checkpoint_path() -> Path | None:
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    candidates = list(CHECKPOINT_DIR.glob("*.pt"))
+    if len(candidates) == 0:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _resolve_checkpoint(payload: dict[str, Any]) -> Path:
+    raw_name = payload.get("name")
+    raw_path = payload.get("path")
+
+    if raw_name is not None:
+        candidate = (CHECKPOINT_DIR / str(raw_name)).resolve()
+    elif raw_path is not None:
+        candidate = Path(str(raw_path)).expanduser().resolve()
+    else:
+        raise ValueError("Provide 'name' or 'path'.")
+
+    base = CHECKPOINT_DIR.resolve()
+    if not str(candidate).startswith(str(base)):
+        raise ValueError("Checkpoint path must be inside mcts/checkpoints.")
+    if candidate.suffix != ".pt":
+        raise ValueError("Checkpoint must be a .pt file.")
+    if not candidate.exists():
+        raise ValueError(f"Checkpoint not found: {candidate.name}")
+
+    return candidate
+
+
+def _load_checkpoint(path: Path) -> None:
+    net = _ensure_network()
+    device = next(net.parameters()).device
+
+    checkpoint = torch.load(path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    elif isinstance(checkpoint, dict):
+        state_dict = checkpoint
+    else:
+        raise ValueError("Unsupported checkpoint format.")
+
+    net.load_state_dict(state_dict, strict=True)
+    net.eval()
+    _STATE.loaded_checkpoint = str(path.resolve())
+
+
 @app.route("/")
 def index() -> str:
     return render_template("index.html")
@@ -280,6 +378,35 @@ def api_node(node_id: str) -> Any:
     if node is None:
         return jsonify({"error": f"Node '{node_id}' not found"}), 404
     return jsonify(_node_payload(node, node_id))
+
+
+@app.get("/api/checkpoints")
+def api_checkpoints() -> Any:
+    return jsonify(
+        {
+            "checkpoints": _list_checkpoints(),
+            "loaded_checkpoint": _STATE.loaded_checkpoint,
+            "device": str(_STATE.device) if _STATE.device is not None else str(_get_device()),
+        }
+    )
+
+
+@app.post("/api/checkpoints/load")
+def api_load_checkpoint() -> Any:
+    payload = request.get_json(silent=True) or {}
+    try:
+        path = _resolve_checkpoint(payload)
+        _load_checkpoint(path)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    return jsonify(
+        {
+            "ok": True,
+            "loaded_checkpoint": _STATE.loaded_checkpoint,
+            "checkpoints": _list_checkpoints(),
+        }
+    )
 
 
 @app.post("/api/fold")
@@ -342,6 +469,7 @@ def api_expand() -> Any:
         return jsonify({"ok": False, "error": "Selected node does not implement expand()"}), 400
 
     try:
+        _ = _ensure_network()
         expand_fn()
     except Exception as exc:
         return jsonify({"ok": False, "error": f"expand() failed: {exc}"}), 400
@@ -374,7 +502,6 @@ def api_select() -> Any:
             {"ok": False, "error": "select() returned no child", "tree": tree, "selected_node_id": node_id}
         ), 400
 
-    # Manual select should surface the chosen child in the visited-only tree view.
     if int(getattr(selected, "N", 0)) <= 0:
         selected.N = 1
         selected.W = float(getattr(selected, "W", 0.0))
@@ -444,7 +571,7 @@ def main() -> None:
     if args.demo:
         set_tree_root(_build_demo_tree())
 
-    app.run(host=args.host, port=8000, debug=False)
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":
