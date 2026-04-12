@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from data.origami_sampler import OrigamiSampler
-from diffusion.data.noise import add_masked_noise, cosine_schedule
+from diffusion.data.noise import add_masked_noise, cosine_schedule, min_snr_weight
 from diffusion.models.vae import DEFAULT_VAE_CONFIG, VAE, VAEConfig, load_vae
 from diffusion.utils import get_device
 from paper import Paper, Segment, Vec2
@@ -34,6 +34,7 @@ class PipelineConfig:
     image_size: int = 128
     pad_state_value: float = 0.0
     pad_action_value: float = 0.0
+    min_snr_gamma: float | None = 5.0
     vae_config: VAEConfig = DEFAULT_VAE_CONFIG
     vae_checkpoint_path: str | Path | None = None
 
@@ -178,10 +179,9 @@ def _pack_one(
     slot_valid = torch.zeros(slots, dtype=torch.float32)
     slot_valid[: length + 1] = 1.0
 
-    # TODO: Fix pinning, remove temporary disable
     slot_pin = torch.zeros(slots, dtype=torch.float32)
-    # slot_pin[0] = 1.0
-    # slot_pin[length] = 1.0
+    slot_pin[0] = 1.0
+    slot_pin[length] = 1.0
 
     action_valid = torch.zeros_like(slot_valid)
     action_valid[:-1] = slot_valid[1:]
@@ -198,7 +198,7 @@ class PackedTrajectoryDataset(Dataset):
     Dataset that samples one noised diffusion tuple per item access.
 
     Dataset item:
-    `(x_t, t, target, slot_valid_mask, slot_pin_mask)`
+    `(x_t, t, target, slot_valid_mask, slot_pin_mask, denoise_mask, loss_weight)`
     """
 
     def __init__(
@@ -250,7 +250,7 @@ class PackedTrajectoryDataset(Dataset):
         """
         return int(self.x_0.shape[0])
 
-    def __getitem__(self, idx: int) -> tuple[Tensor, int, Tensor, Tensor, Tensor]:
+    def __getitem__(self, idx: int) -> tuple[Tensor, int, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """
         Sample one noised training tuple for a trajectory.
 
@@ -258,7 +258,7 @@ class PackedTrajectoryDataset(Dataset):
             idx: Trajectory index.
 
         Returns:
-            Tuple `(x_t, t, target, slot_valid_mask, slot_pin_mask)`.
+            Tuple `(x_t, t, target, slot_valid_mask, slot_pin_mask, denoise_mask, loss_weight)`.
         """
         x_0 = self.x_0[idx]
         denoise = self.denoise[idx]
@@ -271,7 +271,15 @@ class PackedTrajectoryDataset(Dataset):
             sigma_t=self.sigmas[t],
             target_type=self.cfg.noise_target,
         )
-        return x_t, t, target, self.slot_valid[idx], self.slot_pin[idx]
+        loss_weight = torch.tensor(1.0, dtype=torch.float32)
+        if self.cfg.min_snr_gamma is not None:
+            loss_weight = min_snr_weight(
+                alpha_t=self.alphas[t],
+                sigma_t=self.sigmas[t],
+                gamma=float(self.cfg.min_snr_gamma),
+            ).to(torch.float32)
+
+        return x_t, t, target, self.slot_valid[idx], self.slot_pin[idx], denoise, loss_weight
 
 
 __all__ = [
@@ -307,10 +315,12 @@ if __name__ == "__main__":
     trajectory = TrajectoryExample(papers=papers, actions=actions)
     cfg = PipelineConfig(state_mode="vae")
     dataset = PackedTrajectoryDataset([trajectory], cfg=cfg, device="cpu")
-    x_t, t, target, slot_valid_mask, slot_pin_mask = dataset[0]
+    x_t, t, target, slot_valid_mask, slot_pin_mask, denoise_mask, loss_weight = dataset[0]
 
     print("x_t:", tuple(x_t.shape))
     print("t:", int(t))
     print("target:", tuple(target.shape))
     print("slot_valid_mask:", tuple(slot_valid_mask.shape))
     print("slot_pin_mask:", tuple(slot_pin_mask.shape))
+    print("denoise_mask:", tuple(denoise_mask.shape))
+    print("loss_weight:", float(loss_weight))

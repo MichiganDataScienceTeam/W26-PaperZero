@@ -35,7 +35,7 @@ def main() -> None:
     cfg = PipelineConfig(state_mode="vae", timesteps=100)
     dataset = PackedTrajectoryDataset([trajectory], cfg=cfg, device="cpu")
 
-    x_t, t, target, slot_valid_mask, slot_pin_mask = dataset[0]
+    x_t, t, target, slot_valid_mask, slot_pin_mask, denoise_mask, loss_weight = dataset[0]
 
     # UNet stuff
     model = UNetDenoiser(token_dim=dataset.token_dim, state_dim=dataset.state_dim, base_ch=64, time_dim=128)
@@ -52,6 +52,8 @@ def main() -> None:
     print("x_t:", tuple(x_t.shape))
     print("target:", tuple(target.shape))
     print("pred:", tuple(pred.shape))
+    print("denoise_mask:", tuple(denoise_mask.shape))
+    print("loss_weight:", float(loss_weight))
     print("inference_ok:", pred.shape == (1, x_t.shape[0], x_t.shape[1]))
 
 

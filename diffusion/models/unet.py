@@ -93,7 +93,7 @@ class _SelfAttention1D(nn.Module):
         self.norm = nn.GroupNorm(groups, channels)
         self.attn = nn.MultiheadAttention(channels, num_heads=num_heads, batch_first=True)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, key_padding_mask: Tensor | None = None) -> Tensor:
         """
         Args:
             x: Input tensor `(B, C, L)`.
@@ -102,7 +102,7 @@ class _SelfAttention1D(nn.Module):
             Tensor `(B, C, L)`.
         """
         h = self.norm(x).transpose(1, 2)
-        h, _ = self.attn(h, h, h, need_weights=False)
+        h, _ = self.attn(h, h, h, key_padding_mask=key_padding_mask, need_weights=False)
         return x + h.transpose(1, 2)
 
 
@@ -238,26 +238,36 @@ class UNetDenoiser(DenoiserModel):
         t_emb = self.time_mlp(timestep_embedding(t, self.time_dim))
 
         h = self.in_proj(h)
+        valid_mask = slot_valid_mask.to(torch.bool)
 
         skips: list[Tensor] = []
+        valid_masks: list[Tensor] = []
+        def _apply_attn(module: nn.Module, x: Tensor, key_padding_mask: Tensor) -> Tensor:
+            if isinstance(module, _SelfAttention1D):
+                return module(x, key_padding_mask=key_padding_mask)
+            return module(x)
+
         for level_idx, blocks in enumerate(self.down_blocks):
             for block in blocks:
                 h = block(h, t_emb)
-            h = self.down_attn[level_idx](h)
+            h = _apply_attn(self.down_attn[level_idx], h, ~valid_mask)
             skips.append(h)
+            valid_masks.append(valid_mask)
             if level_idx < self.levels - 1:
                 h = self.downsamples[level_idx](h)
+                valid_mask = valid_mask[:, ::2]
 
         h = self.mid_block1(h, t_emb)
-        h = self.mid_attn(h)
+        h = _apply_attn(self.mid_attn, h, ~valid_mask)
         h = self.mid_block2(h, t_emb)
 
         for up_idx, blocks in enumerate(self.up_blocks):
             skip = skips[-(up_idx + 1)]
+            valid_mask = valid_masks[-(up_idx + 1)]
             h = torch.cat([h, skip], dim=1)
             for block in blocks:
                 h = block(h, t_emb)
-            h = self.up_attn[up_idx](h)
+            h = _apply_attn(self.up_attn[up_idx], h, ~valid_mask)
             if up_idx < len(self.upsamples):
                 h = self.upsamples[up_idx](h)
 

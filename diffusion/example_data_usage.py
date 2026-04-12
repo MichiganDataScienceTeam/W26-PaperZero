@@ -35,13 +35,15 @@ def main() -> None:
         timesteps=100,
     )
     dataset = PackedTrajectoryDataset([trajectory1, trajectory2], cfg=cfg, device="cpu")
-    x_t, t, target, slot_valid_mask, slot_pin_mask = dataset[0]
+    x_t, t, target, slot_valid_mask, slot_pin_mask, denoise_mask, loss_weight = dataset[0]
 
     print("Config check:")
     print("dataset_size:", len(dataset))
     print("state_mode:", cfg.state_mode)
     print("slot_valid_mask:", tuple(slot_valid_mask.shape))
     print("slot_pin_mask:", tuple(slot_pin_mask.shape))
+    print("denoise_mask:", tuple(denoise_mask.shape))
+    print("loss_weight:", float(loss_weight))
 
     print("\nFirst trajectory:")
     print("folds:", int(trajectory1.actions.shape[0]))

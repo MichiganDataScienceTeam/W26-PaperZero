@@ -21,6 +21,9 @@ def cosine_schedule(num_steps: int) -> tuple[Tensor, Tensor]:
     steps = torch.linspace(0, 1, num_steps + 1, dtype=torch.float32)
     alphas = torch.cos(steps * math.pi / 2)
     sigmas = torch.sin(steps * math.pi / 2)
+    # Keep endpoints exact to avoid tiny numeric drift at t=0 and t=T.
+    alphas[0], sigmas[0] = 1.0, 0.0
+    alphas[-1], sigmas[-1] = 0.0, 1.0
     return alphas, sigmas
 
 
@@ -89,4 +92,37 @@ def add_masked_noise(
     return x_t, denoise_mask * target
 
 
-__all__ = ["cosine_schedule", "sample_timesteps", "add_masked_noise"]
+def min_snr_weight(
+    alpha_t: Tensor | float,
+    sigma_t: Tensor | float,
+    gamma: float = 5.0,
+    eps: float = 1e-8,
+) -> Tensor:
+    """
+    Compute Min-SNR timestep weight `min(snr, gamma) / snr`.
+    """
+    alpha = torch.as_tensor(alpha_t, dtype=torch.float32)
+    sigma = torch.as_tensor(sigma_t, dtype=torch.float32)
+    snr = (alpha * alpha) / (sigma * sigma + eps)
+    snr_safe = snr.clamp_min(eps)
+    gamma_t = torch.as_tensor(gamma, dtype=snr.dtype, device=snr.device)
+    return torch.minimum(snr_safe, gamma_t) / snr_safe
+
+
+def masked_mse_loss(pred: Tensor, target: Tensor, mask: Tensor, eps: float = 1e-8) -> Tensor:
+    """
+    Mask-aware MSE: sum((pred-target)^2 * mask) / max(sum(mask), eps).
+    """
+    if pred.shape != target.shape or pred.shape != mask.shape:
+        raise ValueError("pred, target, and mask must have the same shape")
+    squared = (pred - target).pow(2) * mask
+    return squared.sum() / mask.sum().clamp_min(eps)
+
+
+__all__ = [
+    "cosine_schedule",
+    "sample_timesteps",
+    "add_masked_noise",
+    "min_snr_weight",
+    "masked_mse_loss",
+]
