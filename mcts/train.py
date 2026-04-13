@@ -69,7 +69,7 @@ def _calculate_iou(mask1: npt.NDArray[np.bool_], mask2: npt.NDArray[np.bool_]) -
         return float(intersection / union) if union > 0 else 0
 
 
-def tree_algo(root: Node, num_simulations: int = 15) -> Node:
+def tree_algo(root: Node, num_simulations: int = 50) -> Node:
     """Select, expand, and backprop."""
     for _ in range(num_simulations):
         node: Node = root
