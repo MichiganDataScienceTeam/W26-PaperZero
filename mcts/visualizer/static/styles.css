@@ -1,0 +1,184 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #f2f2f2;
+  --text: #161616;
+  --muted: #5b5b5b;
+  --line: #bdbdbd;
+  --accent: #135fdb;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+.layout {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(300px, 26vw) minmax(680px, 1fr);
+  gap: 14px;
+  padding: 12px;
+}
+
+.left,
+.right {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+}
+
+.header-row h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+#statusText {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.heatmaps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.checkpoint-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.checkpoint-row label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.checkpoint-row select {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: #fff;
+  color: #111;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+}
+
+button {
+  border: 1px solid #1f1f1f;
+  border-radius: 0;
+  background: #ffffff;
+  color: #111111;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #f4f4f4;
+}
+
+button:active {
+  background: #eaeaea;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tree-container {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  padding: 16px;
+}
+
+#treeSvg {
+  display: block;
+  width: 100%;
+  min-height: 520px;
+}
+
+.tree-node rect {
+  fill: #ffffff;
+  stroke: #3e3e3e;
+  stroke-width: 1;
+}
+
+.tree-node image {
+  image-rendering: pixelated;
+}
+
+.tree-link {
+  stroke: #949494;
+  stroke-width: 1;
+  fill: none;
+}
+
+.tree-node.active rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.tree-badge {
+  font-size: 10px;
+  fill: #1f1f1f;
+}
+
+.tree-tooltip {
+  position: fixed;
+  z-index: 20;
+  white-space: pre;
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.25;
+  color: #111;
+  background: #fff;
+  border: 1px solid #1f1f1f;
+  padding: 6px 8px;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  #treeSvg {
+    min-height: 420px;
+  }
+}
