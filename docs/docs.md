@@ -18,7 +18,6 @@ Contact me by email or on Slack if you think there are mistakes. You are probabl
 - [`paper`](modules/paper.md)
 - [`framework`](modules/framework.md)
 - [`data.origami_sampler`](modules/data.origami_sampler.md)
-- [`envs.origami_env`](modules/envs.origami_env.md)
 
 ## Setup
 
@@ -36,7 +35,6 @@ python -m pip install -r requirements.txt
 ```bash
 python -c "import paper; print('paper ok')"
 python -c "from data.origami_sampler import OrigamiSampler; print('sampler ok')"
-python -c "from envs.origami_env import OrigamiEnv; print('env ok')"
 ```
 
 Expected output:

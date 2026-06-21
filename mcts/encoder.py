@@ -163,7 +163,6 @@ if __name__ == "__main__":
     ax[0].set_title("Start Point Policy")
     
     ax[1].imshow(policy2, cmap='Blues', origin='lower')
-    ax[1].imshow(policy2, cmap='Blues', origin='lower')
     ax[1].set_title("End Point Policy")
     
     plt.show()
