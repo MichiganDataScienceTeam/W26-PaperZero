@@ -1,9 +1,13 @@
 .vscode
 .DS_Store
 *__pycache__
+*.pyc
 *.so
 *.pyd
 *.ipynb
+
+*.pt
+mcts/checkpoints/
 .rendered.*
 _ignore_*
 env
