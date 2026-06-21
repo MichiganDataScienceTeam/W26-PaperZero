@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,8 @@ from mcts.encoder import ThinkArchitecture
 
 RESOLUTION = 128
 CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
-AUTOLOAD_LATEST_CHECKPOINT = True
+FIXED_CHECKPOINT_NAME = "model_cycle_068.pt"
+FIXED_CHECKPOINT_ROOT_PATH = Path(__file__).resolve().parents[2] / FIXED_CHECKPOINT_NAME
 app = Flask(__name__)
 
 
@@ -111,14 +113,7 @@ def _ensure_network() -> ThinkArchitecture:
         net.to(_STATE.device)
         net.eval()
         _STATE.network = net
-
-        if AUTOLOAD_LATEST_CHECKPOINT:
-            latest = _latest_checkpoint_path()
-            if latest is not None:
-                try:
-                    _load_checkpoint(latest)
-                except Exception:
-                    pass
+        _load_checkpoint(_resolve_fixed_checkpoint())
     return _STATE.network
 
 
@@ -300,48 +295,37 @@ def _backprop_after_manual_fold(parent: Any, child: Any, value_estimate: float) 
 
 
 def _list_checkpoints() -> list[dict[str, Any]]:
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    out: list[dict[str, Any]] = []
-    for path in sorted(CHECKPOINT_DIR.glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True):
-        out.append(
-            {
-                "name": path.name,
-                "path": str(path.resolve()),
-                "mtime": float(path.stat().st_mtime),
-                "loaded": str(path.resolve()) == _STATE.loaded_checkpoint,
-            }
-        )
-    return out
+    checkpoint_path = _resolve_fixed_checkpoint()
+    return [
+        {
+            "name": checkpoint_path.name,
+            "path": str(checkpoint_path.resolve()),
+            "mtime": float(checkpoint_path.stat().st_mtime),
+            "loaded": str(checkpoint_path.resolve()) == _STATE.loaded_checkpoint,
+        }
+    ]
 
 
-def _latest_checkpoint_path() -> Path | None:
+def _resolve_fixed_checkpoint() -> Path:
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    candidates = list(CHECKPOINT_DIR.glob("*.pt"))
-    if len(candidates) == 0:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    checkpoint_path = (CHECKPOINT_DIR / FIXED_CHECKPOINT_NAME).resolve()
+    if checkpoint_path.exists():
+        return checkpoint_path
+
+    root_checkpoint = FIXED_CHECKPOINT_ROOT_PATH.resolve()
+    if root_checkpoint.exists():
+        shutil.copy2(root_checkpoint, checkpoint_path)
+        return checkpoint_path
+
+    raise FileNotFoundError(
+        f"Fixed checkpoint '{FIXED_CHECKPOINT_NAME}' not found in '{CHECKPOINT_DIR}' "
+        f"or repo root '{FIXED_CHECKPOINT_ROOT_PATH.parent}'."
+    )
 
 
 def _resolve_checkpoint(payload: dict[str, Any]) -> Path:
-    raw_name = payload.get("name")
-    raw_path = payload.get("path")
-
-    if raw_name is not None:
-        candidate = (CHECKPOINT_DIR / str(raw_name)).resolve()
-    elif raw_path is not None:
-        candidate = Path(str(raw_path)).expanduser().resolve()
-    else:
-        raise ValueError("Provide 'name' or 'path'.")
-
-    base = CHECKPOINT_DIR.resolve()
-    if not str(candidate).startswith(str(base)):
-        raise ValueError("Checkpoint path must be inside mcts/checkpoints.")
-    if candidate.suffix != ".pt":
-        raise ValueError("Checkpoint must be a .pt file.")
-    if not candidate.exists():
-        raise ValueError(f"Checkpoint not found: {candidate.name}")
-
-    return candidate
+    _ = payload
+    return _resolve_fixed_checkpoint()
 
 
 def _load_checkpoint(path: Path) -> None:
