@@ -4,7 +4,7 @@ from paper import Paper, Segment
 import numpy as np
 import torch
 import math
-from mcts.temp_segment_finder import find_segments
+from mcts.segment_finder import find_segments
 
 from typing import TYPE_CHECKING, Any, List, Tuple
 import numpy.typing as npt
@@ -98,11 +98,12 @@ class Node:
         self.paper: Paper = paper
         self.segment: Segment | None = segment
         self.target_mask = np.asarray(target_mask, dtype=np.float32).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
-        
-        self.N = 0      # number of visits
-        self.W = 0.0    # sum of all values
-        self.Q = self.W / self.N if self.N != 0 else 0.0    # W/N (0 if N = 0)
-        self.P = 0.0 if not self.parent else self.parent.P     # prior
+
+        # AlphaZero statistics: visit count, value sum, mean value, prior.
+        self.N = 0
+        self.W = 0.0
+        self.Q = 0.0
+        self.P = 0.0 if self.parent is None else self.parent.P
         self.action_key: Tuple[float, float, float, float] | None = (
             None if segment is None else _segment_key(segment)
         )
@@ -111,18 +112,6 @@ class Node:
         self.last_value_eval: float | None = None
         self.was_expanded: bool = False
 
-        # constants
-        self.sumB = None
-
-    # For testing purposes
-    def render(self):
-        import matplotlib.pyplot as plt
-        img = self.paper.rasterize(128, 128, 0.0)
-        img = np.array(img)
-        plt.imshow(img, cmap="gray", origin="lower")
-        plt.text(0, -17, f'Visits: {self.N}\nPrior: {self.P}\nValue: {self.W}', fontsize=12)
-        plt.show()
-
     def _expand_from_network_outputs(self, policy_logits: torch.Tensor, value_scalar: float) -> None:
         """Expand using precomputed network outputs for this node state."""
         self.was_expanded = False
@@ -130,48 +119,23 @@ class Node:
         self.last_value_eval = None
 
         # Generate list of segments
-        segments = find_segments(self.paper)
-        if len(segments) == 0:
+        folds = find_segments(self.paper)
+        if not folds:
             return
 
-        # Deduplicate actions by deterministic key.
-        unique_segments: list[Segment] = []
-        seen: set[Tuple[float, float, float, float]] = set()
-        for seg in segments:
-            key = _segment_key(seg)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique_segments.append(seg)
-
-        policy = policy_logits  # (2, H, W)
-        start_logits = policy[0]
-        end_logits = policy[1]
-
-        # Convert to numpy once to avoid repeated tensor indexing overhead in the candidate loop.
-        start_probs = torch.softmax(start_logits.flatten(), dim=0).view_as(start_logits).detach().cpu().numpy()
-        end_probs = torch.softmax(end_logits.flatten(), dim=0).view_as(end_logits).detach().cpu().numpy()
+        # policy_logits is (2, H, W): channel 0 scores fold start points,
+        # channel 1 scores fold end points. Normalise each to a spatial prior.
+        start_probs = torch.softmax(policy_logits[0].flatten(), dim=0).view_as(policy_logits[0]).detach().cpu().numpy()
+        end_probs = torch.softmax(policy_logits[1].flatten(), dim=0).view_as(policy_logits[1]).detach().cpu().numpy()
+        h, w = start_probs.shape
+        bounds = tuple(float(v) for v in self.paper.compute_bounds())
 
         candidates: list[tuple[Segment, Paper, float, tuple[int, int, int, int]]] = []
-        h, w = start_probs.shape
-        min_x, max_x, min_y, max_y = self.paper.compute_bounds()
-        bounds = (float(min_x), float(max_x), float(min_y), float(max_y))
-
-        for seg in unique_segments:
-            pt1, pt2 = seg.p1, seg.p2
-
-            y1, x1 = _point_to_grid_index(float(pt1.x), float(pt1.y), bounds, h, w)
-            y2, x2 = _point_to_grid_index(float(pt2.x), float(pt2.y), bounds, h, w)
-
-            pr1 = float(start_probs[y1, x1])
-            pr2 = float(end_probs[y2, x2])
-            copyP = self.paper.copy()
-            if not copyP.fold(seg):
-                continue
-            candidates.append((seg, copyP, float(pr1 * pr2), (y1, x1, y2, x2)))
-
-        if len(candidates) == 0:
-            return
+        for segment, folded_paper in folds:
+            y1, x1 = _point_to_grid_index(float(segment.p1.x), float(segment.p1.y), bounds, h, w)
+            y2, x2 = _point_to_grid_index(float(segment.p2.x), float(segment.p2.y), bounds, h, w)
+            prior = float(start_probs[y1, x1] * end_probs[y2, x2])
+            candidates.append((segment, folded_paper, prior, (y1, x1, y2, x2)))
 
         raw_priors = np.array([candidate[2] for candidate in candidates], dtype=np.float32)
         if raw_priors.sum() > 0:
@@ -182,7 +146,6 @@ class Node:
         start_target = np.zeros((h, w), dtype=np.float32)
         end_target = np.zeros((h, w), dtype=np.float32)
 
-        # Create children - expand
         for i, (seg, folded_paper, _, (y1, x1, y2, x2)) in enumerate(candidates):
             child = Node(
                 paper=folded_paper,
@@ -209,7 +172,7 @@ class Node:
         self.was_expanded = True
     
         # Evaluate & Backprop - update W, N, Q for all visited nodes
-        node: Node = self
+        node: Node | None = self
         while node is not None:
             node.W += value_scalar
             node.N += 1
@@ -226,19 +189,17 @@ class Node:
         self._expand_from_network_outputs(policy.squeeze(0), float(value.item()))
 
 
-    def select(self, c=1):
-        # Make sure there's children
-        if len(self.children) == 0:
-            return None # We're done (leaf node)
+    def select(self, c: float = 1.0) -> "Node | None":
+        """Return the child maximising the PUCT score, or None at a leaf."""
+        if not self.children:
+            return None
 
-        self.sumB = sum(child.N for child in self.children)
+        explore_scale = c * math.sqrt(sum(child.N for child in self.children) + 1)
 
-        # Uses PUCT instead
-        def puct_score(self, child, c):
-            explore = c * child.P * math.sqrt(self.sumB + 1) / (1 + child.N)
-            return child.Q + explore
+        def puct_score(child: Node) -> float:
+            return child.Q + explore_scale * child.P / (1 + child.N)
 
-        return max(self.children, key=lambda child: puct_score(self, child, c))
+        return max(self.children, key=puct_score)
 
     def export_training_record(self) -> dict[str, Any]:
         """
@@ -256,20 +217,3 @@ class Node:
             "value": float(self.Q),
             "visits": int(self.N),
         }
-    
-if __name__ == "__main__":
-    from mcts.encoder import ThinkArchitecture
-
-    paper = Paper()
-    model = ThinkArchitecture(2, 128, 3)
-    root = Node(paper=paper, model=model, target_mask=np.ones((128, 128), dtype=np.float32))
-
-    root.expand()
-    new_node = root.select()
-    if new_node is not None:
-        new_node.render()   # Check if None
-
-        new_node.expand()
-        new_node2 = new_node.select()
-        if new_node2 is not None:
-            new_node2.render()  # Check if None

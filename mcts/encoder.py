@@ -1,6 +1,4 @@
 import torch.nn as nn
-from paper import Paper, Segment, Vec2
-import numpy as np
 import torch
 
 
@@ -14,7 +12,7 @@ class ConvBlock(nn.Module):
             kernel_size=kernel,
             stride=1,
             padding="same",
-            bias = False
+            bias=False,
         )
         self.norm = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU()
@@ -107,15 +105,13 @@ class ValueHead(nn.Module):
 
 
 class ThinkArchitecture(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel: int):
+    def __init__(self, in_channels: int, out_channels: int, kernel: int, num_res_blocks: int = 9):
         super().__init__()
 
         self.conv = ConvBlock(in_channels, out_channels, kernel)
-        
-        # 5-9 ResBlocks
-        self.res_tower = nn.ModuleList([
-            ResBlock(out_channels, kernel) for _ in range(9)
-        ])
+        self.res_tower = nn.ModuleList(
+            [ResBlock(out_channels, kernel) for _ in range(num_res_blocks)]
+        )
 
         self.policy = PolicyHead(out_channels)
         self.value = ValueHead(out_channels)
@@ -130,39 +126,3 @@ class ThinkArchitecture(nn.Module):
         value = self.value(out)
 
         return (policy, value)
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    paper = Paper()
-    seg = Segment(Vec2(0.0, 0.0), Vec2(1.0, 1.0))
-    fold = paper.fold(seg)
-
-    img = paper.rasterize(128, 128, 0.0)
-    img = np.array(img).reshape(128, 128)
-
-    target = np.ones((128, 128), dtype=np.float32)
-    img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0)
-    target_tensor = torch.tensor(target, dtype=torch.float32).unsqueeze(0)
-    state_tensor = torch.cat([img_tensor, target_tensor], dim=0).unsqueeze(0)
-    network = ThinkArchitecture(2, 128, 3)
-
-    policy, value = network(state_tensor)
-    policy_np = policy.detach().squeeze().numpy() 
-
-    print(f"Value: {value.item()}")
-    
-    policy1 = policy_np[0] # Channel 0: Start Point Map
-    policy2 = policy_np[1] # Channel 1: End Point Map
-
-    # Plot
-    fig, ax = plt.subplots(1, 2)
-    
-    ax[0].imshow(policy1, cmap='Reds', origin='lower')
-    ax[0].set_title("Start Point Policy")
-    
-    ax[1].imshow(policy2, cmap='Blues', origin='lower')
-    ax[1].set_title("End Point Policy")
-    
-    plt.show()
