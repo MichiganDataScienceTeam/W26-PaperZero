@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
-from typing import List
+from typing import List, Tuple
 
 
 class Vec2:
@@ -84,12 +84,12 @@ class Paper:
         """
         ...
     
-    def compute_boundary_points(self, max_dist: float) -> npt.NDArray[np.float64]:
+    def compute_boundary_points(self, max_dist: float) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.uint64]]:
         """
-        Computes an unordered array of shape (N, 2) containing N points
-        along the exterior boundary of this Paper separated by at most
-        max_dist. The array is also guaranteed to contain all boundary
-        vertices.
+        Computes an array of shape (N, 2) containing N points along the
+        exterior boundary of this Paper separated by at most max_dist,
+        plus offsets idx such that points[idx[i]:idx[i+1]] lie on boundary
+        edge i. The points are guaranteed to contain all boundary vertices.
         Points on the same edge are evenly spaced but points on
         different edges might not have the same spacing
 
