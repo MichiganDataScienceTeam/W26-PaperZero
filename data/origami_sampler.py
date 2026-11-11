@@ -42,9 +42,12 @@ class OrigamiSampler(ContextSampler):
 
         for _ in range(level):
             for _ in range(self.max_paper_retries):
-                curr_layers = len(paper.layers)
-                fold_array = self._generate_single_fold(paper)
-                if len(paper.layers) != curr_layers:
+                # Fold a copy so a fold that does not add layers is discarded
+                # instead of silently changing the paper without being recorded.
+                candidate = paper.copy()
+                fold_array = self._generate_single_fold(candidate)
+                if len(candidate.layers) != len(paper.layers):
+                    paper = candidate
                     total_action.append(fold_array)
                     break
 
