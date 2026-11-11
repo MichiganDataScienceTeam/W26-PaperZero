@@ -40,6 +40,8 @@ ROLLOUTS_PER_ROOT = 16
 MAX_TREE_DEPTH = 10
 TREE_IOU_TERMINATION_THRESHOLD = 0.9
 MIN_NODE_VISITS_FOR_RECORD = 3
+ROOT_DIRICHLET_ALPHA = 0.03  # AlphaZero's Go value, suited to ~250 legal folds per node
+ROOT_DIRICHLET_FRACTION = 0.25
 NEW_RECORDS_PER_CYCLE = 256
 HELDOUT_TARGET_COUNT = 10
 EVAL_ROLLOUTS_PER_TARGET = 8
@@ -122,18 +124,29 @@ class FoldDataset(Dataset):
         return self.samples[idx]
 
 
+def _sample_target_mask(sampler: OrigamiSampler, level: int) -> np.ndarray:
+    """Sample a target the unfolded paper does not already match (tiny corner folds can)."""
+    start_mask = _paper_mask(Paper())
+    while True:
+        final_paper = sampler.sample(level=level)["final_paper"]
+        target_mask = _paper_mask(final_paper)
+        if _calculate_iou(start_mask, target_mask) < TREE_IOU_TERMINATION_THRESHOLD:
+            return target_mask
+
+
 def _make_root_node(sampler: OrigamiSampler, model: ThinkArchitecture, level: int) -> Node:
-    sample = sampler.sample(level=level)
-    final_paper = sample["final_paper"]
-    target_mask = np.array(
-        final_paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0),
-        dtype=np.float32,
-    ).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
-    return Node(paper=Paper(), model=model, target_mask=target_mask)
+    return Node(paper=Paper(), model=model, target_mask=_sample_target_mask(sampler, level))
 
 
 def _make_root_from_target(target_mask: np.ndarray, model: ThinkArchitecture) -> Node:
     return Node(paper=Paper(), model=model, target_mask=np.array(target_mask, dtype=np.float32))
+
+
+def _paper_mask(paper: Paper) -> np.ndarray:
+    return np.array(
+        paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0),
+        dtype=np.float32,
+    ).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
 
 
 def _calculate_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
@@ -148,94 +161,54 @@ def _is_terminal_leaf(node: Node, cache: dict[int, bool]) -> bool:
     key = id(node)
     if key in cache:
         return cache[key]
-    node_mask = np.array(
-        node.paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0),
-        dtype=np.float32,
-    ).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
-    terminal = _calculate_iou(node_mask, np.array(node.target_mask, dtype=np.float32)) >= TREE_IOU_TERMINATION_THRESHOLD
+    terminal = _calculate_iou(_paper_mask(node.paper), np.array(node.target_mask, dtype=np.float32)) >= TREE_IOU_TERMINATION_THRESHOLD
     cache[key] = terminal
     return terminal
 
 
-def _batched_expand_nodes(nodes: list[Node], model: ThinkArchitecture, device: torch.device) -> tuple[int, int]:
-    if len(nodes) == 0:
-        return 0, 0
-
-    model.eval()
-    b = len(nodes)
-    h = RASTER_RESOLUTION
-    w = RASTER_RESOLUTION
-    states = np.empty((b, 2, h, w), dtype=np.float32)
-
-    for i, node in enumerate(nodes):
-        states[i, 0] = np.array(node.paper.rasterize(h, w, 0.0), dtype=np.float32).reshape(h, w)
-        states[i, 1] = node.target_mask
-
-    with torch.inference_mode():
-        input_batch = torch.from_numpy(states).to(device, non_blocking=(device.type == "cuda"))
-        policy_batch, value_batch = model(input_batch)
-
-    expanded_nodes = 0
-    for i, node in enumerate(nodes):
-        node._expand_from_network_outputs(policy_batch[i], float(value_batch[i].item()))
-        if node.was_expanded:
-            expanded_nodes += 1
-
-    return len(nodes), expanded_nodes
+def _add_root_noise(root: Node) -> None:
+    """Mix Dirichlet noise into the root priors so self-play explores beyond the network's top fold."""
+    noise = np.random.dirichlet([ROOT_DIRICHLET_ALPHA] * len(root.children))
+    for child, eta in zip(root.children, noise):
+        child.P = (1.0 - ROOT_DIRICHLET_FRACTION) * child.P + ROOT_DIRICHLET_FRACTION * float(eta)
 
 
-def _run_rollouts(root: Node, num_rollouts: int, model: ThinkArchitecture, device: torch.device) -> dict[str, int | float]:
+def _run_rollouts(root: Node, num_rollouts: int, root_noise: bool = False) -> dict[str, int | float]:
+    """
+    Run sequential MCTS simulations: select down to a leaf, then score it and back up.
+    Reaching the target is worth 1; dead ends and the depth limit are worth 0;
+    any other leaf is expanded and scored by the value head.
+    """
     expand_calls = 0
-    expanded_nodes = 0
-    select_calls = 0
     terminal_cache: dict[int, bool] = {}
     started = perf_counter()
-    nodes: list[Node | None] = [root for _ in range(num_rollouts)]
-    depths = [0 for _ in range(num_rollouts)]
 
-    while True:
-        if all(node is None for node in nodes):
-            break
+    if root_noise:
+        # The root's expansion is the first simulation; noise needs its children to exist.
+        root.expand()
+        expand_calls += 1
+        num_rollouts -= 1
+        if root.children:
+            _add_root_noise(root)
 
-        frontier: dict[int, Node] = {}
-        for i, node in enumerate(nodes):
-            if node is None:
-                continue
-            if depths[i] >= MAX_TREE_DEPTH:
-                nodes[i] = None
-                continue
-            if len(node.children) == 0:
-                if _is_terminal_leaf(node, terminal_cache):
-                    nodes[i] = None
-                    continue
-                frontier[id(node)] = node
+    for _ in range(num_rollouts):
+        node = root
+        depth = 0
+        while node.children:
+            node = node.select()
+            depth += 1
 
-        if frontier:
-            calls, expanded = _batched_expand_nodes(list(frontier.values()), model, device)
-            expand_calls += calls
-            expanded_nodes += expanded
-
-        for i, node in enumerate(nodes):
-            if node is None:
-                continue
-            select_calls += 1
-            nxt = node.select()
-            if nxt is None:
-                nodes[i] = None
-                continue
-            nodes[i] = nxt
-            depths[i] += 1
-
-        if max(depths, default=0) >= MAX_TREE_DEPTH and all(
-            (node is None or depth >= MAX_TREE_DEPTH) for node, depth in zip(nodes, depths)
-        ):
-            break
+        if _is_terminal_leaf(node, terminal_cache):
+            node.backup(1.0)
+        elif depth >= MAX_TREE_DEPTH:
+            node.backup(0.0)
+        else:
+            node.expand()
+            expand_calls += 1
 
     return {
         "seconds": perf_counter() - started,
         "expand_calls": expand_calls,
-        "expanded_nodes": expanded_nodes,
-        "select_calls": select_calls,
     }
 
 
@@ -246,9 +219,8 @@ def _collect_training_records(root: Node) -> list[dict[str, Any]]:
         node = stack.pop()
         stack.extend(node.children)
 
-        if not node.was_expanded:
-            continue
-        if node.N < MIN_NODE_VISITS_FOR_RECORD:
+        # Leaves (unexpanded, terminal, or dead-end nodes) have no visit distribution to learn from.
+        if not node.children or node.N < MIN_NODE_VISITS_FOR_RECORD:
             continue
 
         record = node.export_training_record()
@@ -285,7 +257,7 @@ def _worker_generate_one_root(current_max_level: int) -> dict[str, Any]:
         model = _WORKER_MODEL
         sampled_level = _sample_training_level(current_max_level)
         root = _make_root_node(sampler, model, sampled_level)
-        rollout_stats = _run_rollouts(root, ROLLOUTS_PER_ROOT, model, torch.device("cpu"))
+        rollout_stats = _run_rollouts(root, ROLLOUTS_PER_ROOT, root_noise=True)
         records = _collect_training_records(root)
         return {
             "records": records,
@@ -319,7 +291,6 @@ def _new_data_gen_executor(model: ThinkArchitecture, max_workers: int) -> Proces
 def _generate_records_for_target_sequential(
     target_records: int,
     model: ThinkArchitecture,
-    device: torch.device,
     current_max_level: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_records: list[dict[str, Any]] = []
@@ -342,7 +313,7 @@ def _generate_records_for_target_sequential(
         sampled_level = _sample_training_level(current_max_level)
         level_counts[sampled_level] = level_counts.get(sampled_level, 0) + 1
         root = _make_root_node(sampler, model, sampled_level)
-        rollout_stats = _run_rollouts(root, ROLLOUTS_PER_ROOT, model, device)
+        rollout_stats = _run_rollouts(root, ROLLOUTS_PER_ROOT, root_noise=True)
         records = _collect_training_records(root)
 
         total_rollout_seconds += float(rollout_stats["seconds"])
@@ -483,7 +454,6 @@ def _generate_records_for_target_multiprocess(
 def _generate_records_for_target(
     target_records: int,
     model: ThinkArchitecture,
-    device: torch.device,
     current_max_level: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if target_records <= 0:
@@ -500,7 +470,7 @@ def _generate_records_for_target(
     use_mp = ENABLE_MULTIPROCESS_DATA_GEN and NUM_DATA_GEN_WORKERS > 1
     if use_mp:
         return _generate_records_for_target_multiprocess(target_records, model, current_max_level)
-    return _generate_records_for_target_sequential(target_records, model, device, current_max_level)
+    return _generate_records_for_target_sequential(target_records, model, current_max_level)
 
 
 def _train_epochs(
@@ -510,7 +480,6 @@ def _train_epochs(
     device: torch.device,
     epochs: int,
 ) -> tuple[float, float]:
-    policy_criterion = torch.nn.MSELoss()
     value_criterion = torch.nn.MSELoss()
     use_amp = ENABLE_CUDA_AMP and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -529,7 +498,9 @@ def _train_epochs(
 
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
                 policy_pred, value_pred = model(state)
-                policy_loss = policy_criterion(policy_pred, policy_target)
+                # Cross-entropy between each target map and the softmax over its channel's pixels.
+                log_probs = torch.log_softmax(policy_pred.float().flatten(2), dim=-1)
+                policy_loss = -(policy_target.flatten(2) * log_probs).sum(dim=-1).mean()
                 value_loss = value_criterion(value_pred, value_target)
                 loss = policy_loss + value_loss
 
@@ -552,12 +523,11 @@ def _train_epochs(
 def _fill_replay_buffer(
     buffer: deque[dict[str, Any]],
     model: ThinkArchitecture,
-    device: torch.device,
     current_max_level: int,
 ) -> None:
     while len(buffer) < REPLAY_BUFFER_SIZE:
         needed = REPLAY_BUFFER_SIZE - len(buffer)
-        records, stats = _generate_records_for_target(needed, model, device, current_max_level)
+        records, stats = _generate_records_for_target(needed, model, current_max_level)
 
         for record in records:
             if len(buffer) >= REPLAY_BUFFER_SIZE:
@@ -613,11 +583,7 @@ def _best_iou_in_tree(root: Node) -> float:
     while stack:
         node = stack.pop()
         stack.extend(node.children)
-        node_mask = np.array(
-            node.paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0),
-            dtype=np.float32,
-        ).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
-        iou = _calculate_iou(node_mask, target)
+        iou = _calculate_iou(_paper_mask(node.paper), target)
         if iou > best:
             best = iou
     return best
@@ -626,13 +592,12 @@ def _best_iou_in_tree(root: Node) -> float:
 def _evaluate_holdout_iou(
     holdout_targets: list[np.ndarray],
     model: ThinkArchitecture,
-    device: torch.device,
 ) -> dict[str, float]:
     ious: list[float] = []
     eval_rollout_seconds = 0.0
     for target in holdout_targets:
         root = _make_root_from_target(target, model)
-        rollout_stats = _run_rollouts(root, EVAL_ROLLOUTS_PER_TARGET, model, device)
+        rollout_stats = _run_rollouts(root, EVAL_ROLLOUTS_PER_TARGET)
         eval_rollout_seconds += float(rollout_stats["seconds"])
         ious.append(_best_iou_in_tree(root))
 
@@ -692,19 +657,13 @@ def main() -> None:
     holdout_targets: list[np.ndarray] = []
     if ENABLE_HELDOUT_EVAL:
         for _ in range(HELDOUT_TARGET_COUNT):
-            sample = sampler.sample(level=current_max_level)
-            final_paper = sample["final_paper"]
-            target_mask = np.array(
-                final_paper.rasterize(RASTER_RESOLUTION, RASTER_RESOLUTION, 0.0),
-                dtype=np.float32,
-            ).reshape(RASTER_RESOLUTION, RASTER_RESOLUTION)
-            holdout_targets.append(target_mask)
+            holdout_targets.append(_sample_target_mask(sampler, current_max_level))
 
     buffer: deque[dict[str, Any]] = deque(maxlen=REPLAY_BUFFER_SIZE)
     best_loss_for_setup = float("inf")
     stale_loss_cycles = 0
 
-    _fill_replay_buffer(buffer, model, device, current_max_level)
+    _fill_replay_buffer(buffer, model, current_max_level)
     print(f"[fill] completed buffer={len(buffer)}")
 
     for cycle in range(1, NUM_CYCLES + 1):
@@ -747,7 +706,7 @@ def main() -> None:
                 )
 
         print(f"[cycle {cycle}] step 2: collect {NEW_RECORDS_PER_CYCLE} new records")
-        records, stats = _generate_records_for_target(NEW_RECORDS_PER_CYCLE, model, device, current_max_level)
+        records, stats = _generate_records_for_target(NEW_RECORDS_PER_CYCLE, model, current_max_level)
         for record in records:
             buffer.append(record)
 
@@ -761,7 +720,7 @@ def main() -> None:
         eval_rollout_seconds = 0.0
         if ENABLE_HELDOUT_EVAL:
             print(f"[cycle {cycle}] step 3: heldout testing ({HELDOUT_TARGET_COUNT} targets)")
-            eval_stats = _evaluate_holdout_iou(holdout_targets, model, device)
+            eval_stats = _evaluate_holdout_iou(holdout_targets, model)
             eval_rollout_seconds = float(eval_stats["eval_rollout_seconds"])
             print(
                 f"[cycle {cycle}] iou mean={eval_stats['mean']:.4f} median={eval_stats['median']:.4f} "

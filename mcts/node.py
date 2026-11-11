@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mcts.encoder import ThinkArchitecture
 
 
-TRAINING_RECORD_SCHEMA_VERSION = 2
+TRAINING_RECORD_SCHEMA_VERSION = 3
 RASTER_RESOLUTION = 128
 POLICY_SPLAT_RADIUS = 2
 POLICY_SPLAT_SIGMA = 0.8
@@ -108,19 +108,16 @@ class Node:
             None if segment is None else _segment_key(segment)
         )
         self.model = model
-        self.last_policy_target: npt.NDArray[np.float32] | None = None
-        self.last_value_eval: float | None = None
-        self.was_expanded: bool = False
+        # (y1, x1, y2, x2) raster cells of this node's fold in the parent's frame.
+        self.grid_index: Tuple[int, int, int, int] | None = None
 
     def _expand_from_network_outputs(self, policy_logits: torch.Tensor, value_scalar: float) -> None:
-        """Expand using precomputed network outputs for this node state."""
-        self.was_expanded = False
-        self.last_policy_target = None
-        self.last_value_eval = None
-
+        """Expand using precomputed network outputs for this node state, then back up the value."""
         # Generate list of segments
         folds = find_segments(self.paper)
         if not folds:
+            # No legal fold can change this paper, so the target is unreachable from here.
+            self.backup(0.0)
             return
 
         # policy_logits is (2, H, W): channel 0 scores fold start points,
@@ -143,10 +140,7 @@ class Node:
         else:
             priors = np.ones_like(raw_priors, dtype=np.float32) / len(raw_priors)
 
-        start_target = np.zeros((h, w), dtype=np.float32)
-        end_target = np.zeros((h, w), dtype=np.float32)
-
-        for i, (seg, folded_paper, _, (y1, x1, y2, x2)) in enumerate(candidates):
+        for i, (seg, folded_paper, _, grid_index) in enumerate(candidates):
             child = Node(
                 paper=folded_paper,
                 model=self.model,
@@ -155,26 +149,16 @@ class Node:
                 target_mask=self.target_mask,
             )
             child.P = float(priors[i])
+            child.grid_index = grid_index
             self.children.append(child)
-            _add_gaussian_splat(start_target, y1, x1, float(priors[i]))
-            _add_gaussian_splat(end_target, y2, x2, float(priors[i]))
 
-        start_sum = float(start_target.sum())
-        end_sum = float(end_target.sum())
-        if start_sum > 0:
-            start_target /= start_sum
-        if end_sum > 0:
-            end_target /= end_sum
+        self.backup(float(value_scalar))
 
-        dense_target = np.stack([start_target, end_target], axis=0).astype(np.float32)
-        self.last_policy_target = dense_target
-        self.last_value_eval = float(value_scalar)
-        self.was_expanded = True
-    
-        # Evaluate & Backprop - update W, N, Q for all visited nodes
+    def backup(self, value: float) -> None:
+        """Add one visit with the given value to this node and all of its ancestors."""
         node: Node | None = self
         while node is not None:
-            node.W += value_scalar
+            node.W += value
             node.N += 1
             node.Q = node.W / node.N
             node = node.parent
@@ -204,16 +188,30 @@ class Node:
     def export_training_record(self) -> dict[str, Any]:
         """
         Stable sample schema for downstream training scripts.
-        This captures the model input state and dense policy target.
+        This captures the model input state and a dense policy target built
+        from the search's child visit counts (the AlphaZero improved policy).
         """
-        if self.last_policy_target is None:
-            raise RuntimeError("Node has no dense policy target. Call expand() and ensure expansion succeeds.")
+        visits = np.array([child.N for child in self.children], dtype=np.float32)
+        if visits.sum() <= 0:
+            raise RuntimeError("Node has no visited children. Run rollouts through it before exporting.")
+
+        start_target = np.zeros((RASTER_RESOLUTION, RASTER_RESOLUTION), dtype=np.float32)
+        end_target = np.zeros((RASTER_RESOLUTION, RASTER_RESOLUTION), dtype=np.float32)
+        for child, child_visits in zip(self.children, visits):
+            if child_visits == 0:
+                continue
+            y1, x1, y2, x2 = child.grid_index
+            _add_gaussian_splat(start_target, y1, x1, float(child_visits))
+            _add_gaussian_splat(end_target, y2, x2, float(child_visits))
+        start_target /= start_target.sum()
+        end_target /= end_target.sum()
+
         state = _build_state_tensor(self.paper, self.target_mask).squeeze(0).cpu().numpy()
 
         return {
             "schema_version": TRAINING_RECORD_SCHEMA_VERSION,
             "state": state,
-            "policy_target": np.array(self.last_policy_target, dtype=np.float32),
+            "policy_target": np.stack([start_target, end_target], axis=0),
             "value": float(self.Q),
             "visits": int(self.N),
         }
