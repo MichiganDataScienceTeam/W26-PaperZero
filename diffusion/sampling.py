@@ -62,6 +62,8 @@ def sample_pure_noise_v(
             sigma_t = sigmas[t].to(device=dev, dtype=x_t.dtype)
 
             # Keep known endpoints exact and noise-free.
+            # The last slot's action is never denoised; it holds the pipeline's pad value (0.0).
+            x_t[:, -1, state_dim:] = 0.0
             if slot_pin[0, 0] > 0:
                 x_t[:, 0, :state_dim] = x0_cond[:, 0, :]
             if slot_pin[0, -1] > 0:
@@ -96,6 +98,7 @@ def sample_pure_noise_v(
             else:
                 x_t = x0_hat
 
+    x_t[:, -1, state_dim:] = 0.0
     if slot_pin[0, 0] > 0:
         x_t[:, 0, :state_dim] = x0_cond[:, 0, :]
     if slot_pin[0, -1] > 0:

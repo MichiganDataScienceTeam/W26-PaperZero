@@ -185,7 +185,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-trajectories", type=int, default=64)
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--image-size", type=int, default=32)
+    parser.add_argument("--image-size", type=int, default=64)
     parser.add_argument("--horizon", type=int, default=15)
     parser.add_argument("--timesteps", type=int, default=100)
     parser.add_argument("--base-ch", type=int, default=32)

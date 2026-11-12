@@ -96,17 +96,23 @@ def min_snr_weight(
     alpha_t: Tensor | float,
     sigma_t: Tensor | float,
     gamma: float = 5.0,
+    target_type: str = "eps",
     eps: float = 1e-8,
 ) -> Tensor:
     """
-    Compute Min-SNR timestep weight `min(snr, gamma) / snr`.
+    Compute the Min-SNR timestep weight for the given training target:
+    `min(snr, gamma) / snr` for `"eps"` and `min(snr, gamma) / (snr + 1)` for `"v"`.
     """
     alpha = torch.as_tensor(alpha_t, dtype=torch.float32)
     sigma = torch.as_tensor(sigma_t, dtype=torch.float32)
     snr = (alpha * alpha) / (sigma * sigma + eps)
     snr_safe = snr.clamp_min(eps)
     gamma_t = torch.as_tensor(gamma, dtype=snr.dtype, device=snr.device)
-    return torch.minimum(snr_safe, gamma_t) / snr_safe
+    if target_type == "eps":
+        return torch.minimum(snr_safe, gamma_t) / snr_safe
+    if target_type == "v":
+        return torch.minimum(snr, gamma_t) / (snr + 1.0)
+    raise ValueError("target_type must be 'eps' or 'v'")
 
 
 def masked_mse_loss(pred: Tensor, target: Tensor, mask: Tensor, eps: float = 1e-8) -> Tensor:

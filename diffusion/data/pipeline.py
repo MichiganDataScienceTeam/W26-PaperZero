@@ -110,6 +110,48 @@ def _encode_states(
     raise ValueError(f"Unsupported state_mode: {cfg.state_mode}")
 
 
+def actions_to_state_frame(papers: Sequence[Paper], actions: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+    """
+    Express each fold in the raster frame of the state it is applied to.
+
+    `Paper.rasterize` fits each paper's bounding box to the image (shape only,
+    no size or position), so absolute fold coordinates do not line up with the
+    rasters. Each point maps to `(p - bounds_min) / max_side`, which is the
+    raster position divided by `image_size - 1`, with y measured upward.
+
+    Args:
+        papers: Paper states `[paper_0, ..., paper_L]`.
+        actions: Absolute fold actions with shape `(L, 4)`.
+
+    Returns:
+        Actions with shape `(L, 4)` in each source state's frame.
+    """
+    framed = np.empty_like(actions, dtype=np.float32)
+    for i, action in enumerate(actions):
+        min_x, max_x, min_y, max_y = papers[i].compute_bounds()
+        side = max(max_x - min_x, max_y - min_y)
+        origin = np.array([min_x, min_y, min_x, min_y])
+        framed[i] = (np.asarray(action, dtype=np.float64) - origin) / side
+    return framed
+
+
+def action_from_state_frame(paper: Paper, framed_action: npt.NDArray[np.float32]) -> npt.NDArray[np.float64]:
+    """
+    Inverse of `actions_to_state_frame` for one fold, used to execute generated actions.
+
+    Args:
+        paper: Paper state the fold is applied to.
+        framed_action: Fold `[x1, y1, x2, y2]` in that paper's raster frame.
+
+    Returns:
+        Absolute fold coordinates `[x1, y1, x2, y2]`.
+    """
+    min_x, max_x, min_y, max_y = paper.compute_bounds()
+    side = max(max_x - min_x, max_y - min_y)
+    origin = np.array([min_x, min_y, min_x, min_y])
+    return origin + np.asarray(framed_action, dtype=np.float64) * side
+
+
 def _validate_trajectory(example: TrajectoryExample, cfg: PipelineConfig) -> int:
     """
     Validate trajectory shapes and return its action length.
@@ -156,7 +198,7 @@ def _pack_one(
         - `slot_pin` has shape `(H+1,)`
     """
     length = _validate_trajectory(example, cfg)
-    actions = torch.from_numpy(np.asarray(example.actions, dtype=np.float32))
+    actions = torch.from_numpy(actions_to_state_frame(example.papers, np.asarray(example.actions, dtype=np.float32)))
 
     states_flat = _encode_states(example.papers, cfg=cfg, vae=vae, device=device)
     state_dim = _state_dim(cfg)
@@ -170,9 +212,10 @@ def _pack_one(
     if length + 1 < slots:
         states[length + 1 :] = states[length].unsqueeze(0)
 
+    # The last slot has no next state, so its action stays at the pad value.
     if length > 0:
         acts[:length] = actions
-        acts[length:] = actions[length - 1].unsqueeze(0)
+        acts[length:-1] = actions[length - 1].unsqueeze(0)
 
     x_0 = torch.cat([states, acts], dim=1)
 
@@ -183,12 +226,11 @@ def _pack_one(
     slot_pin[0] = 1.0
     slot_pin[-1] = 1.0
 
-    action_valid = torch.zeros_like(slot_valid)
-    action_valid[:-1] = slot_valid[1:]
-
+    # Padding actions are denoised like padding states: inference cannot know the
+    # true length, so the model must learn to generate the repeated tail itself.
     denoise = torch.zeros(slots, token_dim, dtype=torch.float32)
     denoise[:, :state_dim] = (1.0 - slot_pin).unsqueeze(-1)
-    denoise[:, state_dim:] = action_valid.unsqueeze(-1)
+    denoise[:-1, state_dim:] = 1.0
 
     return x_0, denoise, slot_valid, slot_pin
 
@@ -285,6 +327,7 @@ class PackedTrajectoryDataset(Dataset):
                 alpha_t=self.alphas[t],
                 sigma_t=self.sigmas[t],
                 gamma=float(self.cfg.min_snr_gamma),
+                target_type=self.cfg.noise_target,
             ).to(torch.float32)
 
         return x_t, t, target, self.model_slot_valid[idx], self.slot_pin[idx], denoise, loss_weight
@@ -296,6 +339,8 @@ __all__ = [
     "PipelineConfig",
     "TrajectoryExample",
     "PackedTrajectoryDataset",
+    "actions_to_state_frame",
+    "action_from_state_frame",
 ]
 
 
